@@ -293,6 +293,10 @@ class SNIESConsolidador:
         btn_encabezados.pack(fill=tk.X, pady=2)
         ToolTip(btn_encabezados, "Muestra los nombres de columna esperados para este tipo")
 
+        btn_preprocesar = ttk.Button(acciones_card, text="🧹 Preprocesar CSV", command=self.abrir_preprocesamiento, style='Warning.TButton')
+        btn_preprocesar.pack(fill=tk.X, pady=2)
+        ToolTip(btn_preprocesar, "Abre una ventana para limpiar y transformar el CSV maestro del tipo actual")
+
         # Panel derecho (datasets + resumen)
         right_frame = ttk.Frame(main_frame)
         right_frame.grid(row=1, column=1, sticky='nsew')
@@ -808,6 +812,17 @@ class SNIESConsolidador:
 
         win.wait_window()
         return resultado.get()
+    
+    def abrir_preprocesamiento(self):
+        """Abre la ventana de preprocesamiento para el tipo actual."""
+        tipo = self.tipo_seleccionado.get()
+        path_csv = self._csv_path(tipo)
+        if not os.path.exists(path_csv):
+            messagebox.showinfo("Sin datos", f"No existe el archivo maestro para '{tipo}'.\nCargue al menos un dataset primero.")
+            return
+        # Importar y lanzar la ventana de preprocesamiento
+        from preprocesamiento import VentanaPreprocesamiento
+        VentanaPreprocesamiento(self.root, tipo, path_csv)
 
 if __name__ == "__main__":
     root = tk.Tk()
