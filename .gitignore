@@ -4,3 +4,5 @@ data/
 !/.env.example
 *service-account*.json
 credentials*.json
+__pycache__/
+*.pyc
