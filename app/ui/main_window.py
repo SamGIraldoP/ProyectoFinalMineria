@@ -2,101 +2,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import pandas as pd
 import os
-import re
-import unicodedata
-import time
-import datetime
+from dotenv import load_dotenv
+from app.config.paths import DATA_DIR
+from app.core.matching import limpiar_nombre_columna, mapear_columnas_expandible, normalizar_para_match, similitud_combinada
+from app.core.google_drive_loader import descargar_datasets_desde_drive
+from app.core.preprocessing_service import preprocesar_csv_maestro
+from app.ui.preprocessing_window import VentanaPreprocesamiento
 
-# ================== Configuración ==================
-UMBRAL = 0.6
-
-# ================== Directorio de datos ==================
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(SCRIPT_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# ================== Funciones de similitud ==================
-def quitar_acentos(texto: str) -> str:
-    nfkd = unicodedata.normalize('NFKD', texto)
-    return ''.join([c for c in nfkd if not unicodedata.combining(c)])
-
-def limpiar_nombre_columna(nombre: str) -> str:
-    n = nombre.replace('\n', ' ').strip()
-    n = n.strip('"').strip("'")
-    n = re.sub(r'\s+', ' ', n)
-    return n
-
-def normalizar_para_match(nombre: str) -> str:
-    nombre = nombre.lower()
-    nombre = quitar_acentos(nombre)
-    nombre = re.sub(r'[^a-z0-9\s]', '', nombre)
-    nombre = re.sub(r'\s+', ' ', nombre).strip()
-    return nombre
-
-def levenshtein_ratio(s1: str, s2: str) -> float:
-    if not s1 and not s2: return 1.0
-    if not s1 or not s2: return 0.0
-    m, n = len(s1), len(s2)
-    d = [[0]*(n+1) for _ in range(m+1)]
-    for i in range(m+1): d[i][0] = i
-    for j in range(n+1): d[0][j] = j
-    for i in range(1, m+1):
-        for j in range(1, n+1):
-            cost = 0 if s1[i-1] == s2[j-1] else 1
-            d[i][j] = min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+cost)
-    return 1 - d[m][n] / max(m, n)
-
-def similitud_combinada(cadena1: str, cadena2: str) -> float:
-    s1 = normalizar_para_match(cadena1)
-    s2 = normalizar_para_match(cadena2)
-    lev = levenshtein_ratio(s1, s2)
-    tokens1 = set(s1.split())
-    tokens2 = set(s2.split())
-    if not tokens1 and not tokens2: jaccard = 1.0
-    elif not tokens1 or not tokens2: jaccard = 0.0
-    else: jaccard = len(tokens1 & tokens2) / len(tokens1 | tokens2)
-    return max(lev, jaccard)
-
-def _es_sexo_genero(cadena1: str, cadena2: str) -> bool:
-    palabras = ['sexo', 'genero', 'género', 'sex', 'gender']
-    c1 = normalizar_para_match(cadena1)
-    c2 = normalizar_para_match(cadena2)
-    if c1.startswith("id") or c2.startswith("id"):
-        return False
-    return any(p in c1 for p in palabras) and any(p in c2 for p in palabras)
-
-def limpiar_flotante(s: str) -> str:
-    if isinstance(s, str) and re.match(r'^-?\d+\.0$', s):
-        return s[:-2]
-    return s
-
-def mapear_columnas_expandible(canonicas, nuevas_raw, umbral=UMBRAL):
-    nuevas_limpias = [limpiar_nombre_columna(c) for c in nuevas_raw]
-    canonicas_limpias = [limpiar_nombre_columna(c) for c in canonicas]
-
-    parejas = []
-    for i, cn in enumerate(canonicas_limpias):
-        for j, nn in enumerate(nuevas_limpias):
-            if _es_sexo_genero(cn, nn):
-                sim = 1.0
-            else:
-                sim = similitud_combinada(cn, nn)
-            if re.search(r'\bid\b', nn):
-                sim *= 0.8
-            if sim >= umbral:
-                parejas.append((sim, i, j))
-    parejas.sort(key=lambda x: x[0], reverse=True)
-
-    canonicas_asignadas = set()
-    nuevas_asignadas = set()
-    mapeo = {i: None for i in range(len(canonicas))}
-    for sim, i, j in parejas:
-        if i not in canonicas_asignadas and j not in nuevas_asignadas:
-            mapeo[i] = j
-            canonicas_asignadas.add(i)
-            nuevas_asignadas.add(j)
-
-    return mapeo
+load_dotenv()
 
 # ================== Tooltip simple ==================
 class ToolTip:
@@ -224,15 +137,11 @@ class SNIESConsolidador:
         self.root.minsize(800, 600)
         self.root.configure(bg=self.COLOR_BG)
 
-        self.data = {}
+        self.data = {}          # tipo -> {"headers": [...], "datasets": [...]}
         self.tipos = [
-            "Estudiantes admitidos",
-            "Estudiantes inscritos",
-            "Estudiantes matriculados",
-            "Estudiantes matriculados en primer curso",
-            "Estudiantes graduados",
-            "Docentes",
-            "Administrativos"
+            "Estudiantes admitidos", "Estudiantes inscritos", "Estudiantes matriculados",
+            "Estudiantes matriculados en primer curso", "Estudiantes graduados",
+            "Docentes", "Administrativos"
         ]
         self.tipo_seleccionado = tk.StringVar()
         self.status_var = tk.StringVar(value="Listo para comenzar.")
@@ -241,7 +150,7 @@ class SNIESConsolidador:
         self.configurar_estilos()
         self.crear_menu()
         self.crear_interfaz()
-        self.cargar_csvs_existentes()
+        self.cargar_csvs_existentes()      # solo metadatos
         self.actualizar_info()
 
     def configurar_estilos(self):
@@ -270,6 +179,8 @@ class SNIESConsolidador:
         self.root.config(menu=menubar)
         archivo_menu = tk.Menu(menubar, tearoff=0, bg='white', fg=self.COLOR_TEXT)
         archivo_menu.add_command(label="📂 Cargar Excel(s)", command=self.cargar_archivos)
+        archivo_menu.add_command(label="☁️ Cargar desde Google Drive", command=self.cargar_desde_google_drive)
+        archivo_menu.add_command(label="⚙️ Preprocesar CSV actual", command=self.preprocesar_csv_actual)
         archivo_menu.add_separator()
         archivo_menu.add_command(label="🧹 Limpiar todo el tipo", command=self.limpiar_datos)
         archivo_menu.add_separator()
@@ -310,9 +221,14 @@ class SNIESConsolidador:
         btn_cargar.pack(fill=tk.X, pady=2)
         ToolTip(btn_cargar, "Selecciona uno o varios archivos Excel para cargar")
 
-        btn_preprocesar = ttk.Button(acciones_card, text="🧹 Preprocesar CSV", command=self.abrir_preprocesamiento, style='Warning.TButton')
-        btn_preprocesar.pack(fill=tk.X, pady=2)
-        ToolTip(btn_preprocesar, "Abre una ventana para limpiar y transformar el CSV maestro del tipo actual")
+        btn_cargar_drive = ttk.Button(
+            acciones_card,
+            text="☁️ Cargar desde Google Drive",
+            command=self.cargar_desde_google_drive,
+            style='Primary.TButton',
+        )
+        btn_cargar_drive.pack(fill=tk.X, pady=2)
+        ToolTip(btn_cargar_drive, "Descarga datasets desde la carpeta datos_snies en Google Drive y los integra automáticamente")
 
         btn_limpiar = ttk.Button(acciones_card, text="🧹 Limpiar todo", command=self.limpiar_datos, style='Warning.TButton')
         btn_limpiar.pack(fill=tk.X, pady=2)
@@ -322,6 +238,20 @@ class SNIESConsolidador:
         btn_encabezados.pack(fill=tk.X, pady=2)
         ToolTip(btn_encabezados, "Muestra los nombres de columna esperados para este tipo")
 
+        btn_preprocesar = ttk.Button(acciones_card, text="🧹 Preprocesar CSV", command=self.abrir_preprocesamiento, style='Warning.TButton')
+        btn_preprocesar.pack(fill=tk.X, pady=2)
+        ToolTip(btn_preprocesar, "Abre una ventana para limpiar y transformar el CSV maestro del tipo actual")
+
+        btn_preprocesar_auto = ttk.Button(
+            acciones_card,
+            text="⚙️ Preprocesar CSV actual",
+            command=self.preprocesar_csv_actual,
+            style='Accent.TButton'
+        )
+        btn_preprocesar_auto.pack(fill=tk.X, pady=2)
+        ToolTip(btn_preprocesar_auto, "Aplica el pipeline base de limpieza directamente sobre el CSV maestro")
+
+        # Panel derecho (datasets + resumen)
         right_frame = ttk.Frame(main_frame)
         right_frame.grid(row=1, column=1, sticky='nsew')
 
@@ -342,12 +272,14 @@ class SNIESConsolidador:
         self.progress = ttk.Progressbar(right_frame, variable=self.progress_var, maximum=100, style='TProgressbar')
         self.progress.pack(fill=tk.X, pady=(10, 0))
 
+        # Resumen del tipo seleccionado
         self.resumen_frame = ttk.Frame(right_frame, style='Card.TFrame', padding=5)
         self.resumen_frame.pack(fill=tk.X, pady=(5, 0))
         self.lbl_resumen = ttk.Label(self.resumen_frame, text="", background='white',
                                      font=('Segoe UI', 10, 'bold'), foreground=self.COLOR_PRIMARY)
         self.lbl_resumen.pack()
 
+        # Barra de estado
         status_frame = tk.Frame(self.root, bg=self.COLOR_PRIMARY, height=30)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_label = tk.Label(status_frame, textvariable=self.status_var, bg=self.COLOR_PRIMARY, fg='white',
@@ -358,7 +290,461 @@ class SNIESConsolidador:
         self.root.rowconfigure(1, weight=1)
         main_frame.rowconfigure(1, weight=1)
 
-    # ---------- Utilidades de datos ----------
+    # ---------- Metadatos ----------
+    @staticmethod
+    def _metadata_path():
+        return os.path.join(DATA_DIR, "metadata.csv")
+
+    def _actualizar_metadatos(self, tipo, datasets):
+        """Guarda en metadata.csv los años y registros de cada tipo."""
+        md_path = self._metadata_path()
+        # Leer existentes o crear nuevo
+        if os.path.exists(md_path):
+            df_md = pd.read_csv(md_path, dtype=str, keep_default_na=False)
+        else:
+            df_md = pd.DataFrame(columns=["tipo", "año", "registros"])
+        # Eliminar entradas anteriores de este tipo
+        df_md = df_md[df_md["tipo"] != tipo]
+        # Agregar nuevas filas
+        nuevas_filas = []
+        for ds in datasets:
+            nuevas_filas.append({"tipo": tipo, "año": str(ds["año"]), "registros": len(ds["filas"])})
+        if nuevas_filas:
+            df_new = pd.DataFrame(nuevas_filas)
+            df_md = pd.concat([df_md, df_new], ignore_index=True)
+        if df_md.empty:
+            if os.path.exists(md_path):
+                os.remove(md_path)
+        else:
+            df_md.to_csv(md_path, index=False, encoding="utf-8-sig")
+
+    # ---------- Carga bajo demanda ----------
+    def _cargar_datos_completos(self, tipo):
+        """Carga el CSV completo del tipo si aún no está en memoria."""
+        if tipo in self.data and self.data[tipo].get("datasets") and self.data[tipo]["datasets"][0].get("filas"):
+            # ya están cargados los datos reales
+            return
+        path = self._csv_path(tipo)
+        if not os.path.exists(path):
+            return
+        try:
+            df = pd.read_csv(path, encoding='utf-8-sig', dtype=str, keep_default_na=False)
+            if df.empty:
+                return
+            canonicas = self.obtener_canonicas(tipo)
+            if canonicas is None:
+                canonicas = list(df.columns)
+            self.data[tipo] = {"headers": canonicas, "datasets": []}
+            if "Año" not in df.columns:
+                return
+            df["Año"] = pd.to_numeric(df["Año"], errors='coerce').fillna(0).astype(int)
+            df = df[df["Año"] != 0]
+            for año in sorted(df["Año"].unique()):
+                subdf = df[df["Año"] == año]
+                alineado = pd.DataFrame(columns=canonicas)
+                for col in canonicas:
+                    if col in subdf.columns:
+                        alineado[col] = subdf[col].values
+                    else:
+                        alineado[col] = ""
+                filas = alineado.values.tolist()
+                n_cols = len(canonicas)
+                for i in range(len(filas)):
+                    if len(filas[i]) < n_cols:
+                        filas[i] += [""] * (n_cols - len(filas[i]))
+                    elif len(filas[i]) > n_cols:
+                        filas[i] = filas[i][:n_cols]
+                self.data[tipo]["datasets"].append({
+                    "archivo": path,
+                    "año": int(año),
+                    "fila_inicio": None,
+                    "filas": filas
+                })
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron cargar los datos de {tipo}:\n{e}")
+
+    # ---------- Carga inicial (solo metadatos) ----------
+    def cargar_csvs_existentes(self):
+        """Al iniciar, solo carga la información resumida de los metadatos."""
+        md_path = self._metadata_path()
+        if not os.path.exists(md_path):
+            return
+        try:
+            df_md = pd.read_csv(md_path, dtype=str)
+            for _, fila in df_md.iterrows():
+                tipo = fila["tipo"]
+                año = int(fila["año"])
+                registros = int(fila["registros"])
+                # Si el tipo no tiene estructura, la creamos vacía
+                if tipo not in self.data:
+                    canonicas = self.obtener_canonicas(tipo)
+                    if canonicas is None:
+                        canonicas = []   # se definirán al cargar completos
+                    self.data[tipo] = {"headers": canonicas, "datasets": []}
+                # Añadir dataset ligero (sin filas reales)
+                self.data[tipo]["datasets"].append({
+                    "archivo": self._csv_path(tipo),
+                    "año": año,
+                    "fila_inicio": None,
+                    "filas": []   # vacío, los datos se cargan bajo demanda
+                })
+                # Guardamos el conteo en un atributo temporal para mostrarlo
+                # (lo guardamos en el dataset con un campo extra "registros")
+                self.data[tipo]["datasets"][-1]["registros"] = registros
+            self.status_var.set("Metadatos cargados correctamente.")
+        except Exception as e:
+            print(f"Error al leer metadatos: {e}")
+
+    def _csv_path(self, tipo):
+        nombre_archivo = tipo.replace(" ", "_") + ".csv"
+        return os.path.join(DATA_DIR, nombre_archivo)
+
+    def _actualizar_csv(self, tipo):
+        """Guarda el CSV del tipo y actualiza los metadatos."""
+        path = self._csv_path(tipo)
+        if tipo not in self.data or not self.data[tipo]["datasets"]:
+            if os.path.exists(path):
+                os.remove(path)
+            self._actualizar_metadatos(tipo, [])
+            return
+        headers = self.data[tipo]["headers"]
+        n_cols = len(headers)
+        todas_filas = []
+        for ds in self.data[tipo]["datasets"]:
+            for fila in ds["filas"]:
+                if len(fila) < n_cols:
+                    fila += [""] * (n_cols - len(fila))
+                elif len(fila) > n_cols:
+                    fila = fila[:n_cols]
+                todas_filas.append(fila)
+        df = pd.DataFrame(todas_filas, columns=headers)
+        if "Año" in df.columns:
+            df["Año"] = pd.to_numeric(df["Año"], errors='coerce').fillna(0).astype(int)
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        # Actualizar metadatos
+        self._actualizar_metadatos(tipo, self.data[tipo]["datasets"])
+
+    # ---------- Visualización ----------
+    def actualizar_info(self, *args):
+        for widget in self.scroll_frame.winfo_children():
+            widget.destroy()
+        tipo = self.tipo_seleccionado.get()
+        if tipo not in self.data or not self.data[tipo]["datasets"]:
+            lbl = ttk.Label(self.scroll_frame, text="No hay datasets cargados para este tipo.",
+                            background='white', font=('Segoe UI', 10))
+            lbl.pack(pady=20)
+            self.lbl_resumen.config(text="")
+            return
+        total_registros = 0
+        total_datasets = len(self.data[tipo]["datasets"])
+        for ds in self.data[tipo]["datasets"]:
+            # Si los datos aún no se cargaron, usar el campo 'registros' del metadata
+            if "registros" in ds and not ds["filas"]:
+                total_registros += ds["registros"]
+            else:
+                total_registros += len(ds["filas"])
+        self.lbl_resumen.config(text=f"📊 Total registros: {total_registros:,}  |  Datasets cargados: {total_datasets}")
+        for idx, ds in enumerate(self.data[tipo]["datasets"]):
+            self._crear_tarjeta_dataset(tipo, idx, ds)
+
+    def _crear_tarjeta_dataset(self, tipo, idx, ds):
+        card = tk.Frame(self.scroll_frame, bg='white', relief='solid', borderwidth=1,
+                        highlightbackground=self.COLOR_PRIMARY, highlightthickness=1)
+        card.pack(fill=tk.X, pady=5, padx=5, ipady=5)
+        nombre_archivo = os.path.basename(ds["archivo"]) if ds["archivo"] else f"{tipo}.csv"
+        # Determinar cantidad de registros (si hay datos reales o metadata)
+        if "registros" in ds and not ds["filas"]:
+            registros = ds["registros"]
+        else:
+            registros = len(ds["filas"])
+        texto = f"{nombre_archivo}  |  Año: {ds['año']}  |  Registros: {registros}"
+        lbl = tk.Label(card, text=texto, anchor='w', bg='white', fg=self.COLOR_PRIMARY,
+                       font=('Segoe UI', 10, 'bold'))
+        lbl.pack(side='left', padx=10, pady=8, fill=tk.X, expand=True)
+        btn_del = ttk.Button(card, text="🗑️ Eliminar",
+                             command=lambda t=tipo, i=idx: self.eliminar_dataset(t, i),
+                             style='Danger.TButton')
+        btn_del.pack(side='right', padx=5, pady=8)
+
+    # ---------- Carga de archivos ----------
+    def cargar_archivos(self):
+        archivos = filedialog.askopenfilenames(
+            title=f"Seleccionar archivos Excel de {self.tipo_seleccionado.get()}",
+            filetypes=[("Archivos Excel", "*.xlsx *.xls"), ("Todos los archivos", "*.*")]
+        )
+        if not archivos:
+            return
+        for archivo in archivos:
+            self.procesar_un_archivo(archivo)
+            self.root.update()
+
+    def cargar_desde_google_drive(self):
+        """Descarga archivos desde Drive y los carga por tipo de manera automatizada."""
+        def _log(msg: str):
+            print(f"[GoogleDrive] {msg}")
+            self.status_var.set(msg)
+            self.root.update()
+
+        _log("Iniciando flujo de carga desde Google Drive...")
+        folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
+        if not folder_id:
+            folder_id = simpledialog.askstring(
+                "Google Drive",
+                "Ingrese el ID de la carpeta datos_snies en Google Drive:",
+                parent=self.root,
+            )
+        if not folder_id:
+            _log("Proceso cancelado: no se proporciono ID de carpeta.")
+            return
+
+        cred_path = os.getenv("GOOGLE_DRIVE_CREDENTIALS_JSON_PATH", "").strip()
+        cred_path = os.path.expanduser(cred_path) if cred_path else ""
+        if not cred_path or not os.path.exists(cred_path):
+            cred_path = filedialog.askopenfilename(
+                title="Seleccionar credenciales de servicio (JSON)",
+                filetypes=[("JSON", "*.json"), ("Todos los archivos", "*.*")],
+            )
+        if not cred_path:
+            _log("Proceso cancelado: no se selecciono archivo de credenciales.")
+            return
+        if not os.path.exists(cred_path):
+            messagebox.showerror("Error", f"No se encontró el archivo JSON en la ruta indicada:\n{cred_path}")
+            _log("Error: la ruta del JSON no existe.")
+            return
+
+        work_dir = os.path.join(DATA_DIR, "gdrive_import")
+        _log("Conectando con Google Drive...")
+
+        try:
+            datasets = descargar_datasets_desde_drive(
+                folder_id.strip(),
+                cred_path,
+                work_dir,
+                progress_cb=_log,
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo descargar desde Google Drive:\n{e}")
+            self.status_var.set("Error al descargar desde Google Drive.")
+            print(f"[GoogleDrive] Error en descarga: {e}")
+            return
+
+        total_archivos = sum(len(v) for v in datasets.values())
+        if total_archivos == 0:
+            messagebox.showinfo("Google Drive", "No se encontraron archivos compatibles en la estructura indicada.")
+            self.status_var.set("Sin archivos compatibles en Google Drive.")
+            print("[GoogleDrive] Sin archivos compatibles para procesar.")
+            return
+
+        _log(f"Comenzando integracion de {total_archivos} archivos descargados...")
+        cargados = 0
+        for tipo, archivos in datasets.items():
+            if not archivos:
+                continue
+            self.tipo_seleccionado.set(tipo)
+            self.actualizar_info()
+            _log(f"Integrando tipo '{tipo}' con {len(archivos)} archivo(s)...")
+            for archivo in archivos:
+                _log(f"Procesando archivo local: {archivo}")
+                self.procesar_un_archivo(
+                    archivo,
+                    tipo_forzado=tipo,
+                    confirmar_encabezados=False,
+                    reemplazar_duplicados=True,
+                )
+                cargados += 1
+                self.root.update()
+
+        self.actualizar_info()
+        self.status_var.set(f"Carga desde Google Drive finalizada. Archivos procesados: {cargados}.")
+        print(f"[GoogleDrive] Proceso finalizado. Archivos procesados: {cargados}")
+        messagebox.showinfo("Google Drive", f"Proceso terminado. Archivos procesados: {cargados}.")
+
+    def procesar_un_archivo(self, archivo, tipo_forzado=None, confirmar_encabezados=True, reemplazar_duplicados=False):
+        tipo = tipo_forzado or self.tipo_seleccionado.get()
+        nombre = os.path.basename(archivo)
+        print(f"[Procesamiento] Iniciando {nombre} | tipo={tipo}")
+
+        self.status_var.set(f"Analizando: {nombre}")
+        self.progress_var.set(10)
+        self.root.update()
+        fila_inicio = self._detectar_fila_encabezado(archivo)
+
+        try:
+            df_a2 = pd.read_excel(archivo, sheet_name=0, header=None, nrows=2)
+            titulo = str(df_a2.iloc[1, 0]) if df_a2.shape[0] > 1 else ""
+        except:
+            titulo = ""
+
+        try:
+            df_muestra = pd.read_excel(archivo, sheet_name=0, header=fila_inicio, nrows=100)
+            if df_muestra.empty:
+                messagebox.showwarning("Archivo vacío", f"{nombre}: no se encontraron datos.")
+                return
+            columnas_detectadas = [limpiar_nombre_columna(c) for c in df_muestra.columns]
+            año = self._extraer_año_desde_df(df_muestra)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
+            print(f"[Procesamiento] Error leyendo {nombre}: {e}")
+            return
+
+        if confirmar_encabezados:
+            if not self._confirmar_encabezados(columnas_detectadas, archivo, año, titulo):
+                self.status_var.set(f"Cancelado: {nombre}")
+                self.progress_var.set(0)
+                return
+
+        self.progress_var.set(30)
+        self.status_var.set(f"Procesando: {nombre}")
+        self.root.update()
+
+        try:
+            df = pd.read_excel(archivo, sheet_name=0, header=fila_inicio)
+            df.dropna(how="all", axis=1, inplace=True)
+            df.dropna(how="all", axis=0, inplace=True)
+            if df.empty:
+                messagebox.showwarning("Sin datos", f"{nombre}: no hay datos después de la limpieza.")
+                print(f"[Procesamiento] Sin datos despues de limpieza: {nombre}")
+                return
+
+            # Cargar datos completos del tipo si aún no están en memoria
+            self._cargar_datos_completos(tipo)
+
+            nuevas_raw = list(df.columns)
+            canonicas = self.obtener_canonicas(tipo)
+            if canonicas is None:
+                canonicas = [limpiar_nombre_columna(c) for c in nuevas_raw]
+
+            mapeo = mapear_columnas_expandible(canonicas, nuevas_raw)
+
+            # Construir DataFrame solo con canónicas
+            df_consolidado = pd.DataFrame()
+            for i, col_canonica in enumerate(canonicas):
+                if mapeo.get(i) is not None:
+                    idx_nuevo = mapeo[i]
+                    df_consolidado[col_canonica] = df.iloc[:, idx_nuevo].values
+                else:
+                    df_consolidado[col_canonica] = pd.NA
+
+            # Convertir a string (excepto Año)
+            for col in df_consolidado.columns:
+                if col != "Año":
+                    df_consolidado[col] = df_consolidado[col].astype(str).replace("<NA>", "")
+
+            año = self._extraer_año_desde_df(df_consolidado)
+            if año is None:
+                messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
+                print(f"[Procesamiento] No se pudo detectar año: {nombre}")
+                return
+            df_consolidado["Año"] = año
+
+            # Verificar duplicado de año
+            if tipo in self.data:
+                existente = next((ds for ds in self.data[tipo]["datasets"] if ds["año"] == año), None)
+                if existente is not None:
+                    if not reemplazar_duplicados:
+                        if not messagebox.askyesno("Año duplicado",
+                                                   f"Ya existen datos para el año {año} en '{tipo}'.\n¿Desea reemplazarlos?"):
+                            self.status_var.set(f"Omitido: {nombre} (año {año} ya existe)")
+                            return
+
+            nuevas_filas = df_consolidado.values.tolist()
+            n_cols = len(canonicas)
+            for i in range(len(nuevas_filas)):
+                if len(nuevas_filas[i]) < n_cols:
+                    nuevas_filas[i] += [""] * (n_cols - len(nuevas_filas[i]))
+                elif len(nuevas_filas[i]) > n_cols:
+                    nuevas_filas[i] = nuevas_filas[i][:n_cols]
+
+            # Actualizar estructura
+            if tipo not in self.data:
+                self.data[tipo] = {"headers": canonicas, "datasets": []}
+            # No se amplían las canónicas
+
+            datasets = self.data[tipo]["datasets"]
+            ds_existente = next((ds for ds in datasets if ds["año"] == año), None)
+            if ds_existente:
+                ds_existente["archivo"] = archivo
+                ds_existente["fila_inicio"] = fila_inicio
+                ds_existente["filas"] = nuevas_filas
+                # Quitar el campo registros si existe para que use filas reales
+                ds_existente.pop("registros", None)
+            else:
+                datasets.append({
+                    "archivo": archivo,
+                    "año": año,
+                    "fila_inicio": fila_inicio,
+                    "filas": nuevas_filas
+                })
+
+            self._actualizar_csv(tipo)
+            self.progress_var.set(100)
+            self.status_var.set(f"✔ {nombre} cargado (Año {año})")
+            self.actualizar_info()
+            print(f"[Procesamiento] Archivo integrado: {nombre} | año={año} | tipo={tipo}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al procesar {nombre}:\n{e}")
+            print(f"[Procesamiento] Error procesando {nombre}: {e}")
+
+    # ---------- Eliminar dataset ----------
+    def eliminar_dataset(self, tipo, idx):
+        if not messagebox.askyesno("Eliminar dataset", "¿Está seguro de eliminar este dataset?\nSe borrarán sus registros del CSV maestro."):
+            return
+        # Asegurar que los datos reales están cargados
+        self._cargar_datos_completos(tipo)
+        del self.data[tipo]["datasets"][idx]
+        if not self.data[tipo]["datasets"]:
+            del self.data[tipo]
+        self._actualizar_csv(tipo) if tipo in self.data else self._borrar_csv(tipo)
+        self.status_var.set("🗑️ Dataset eliminado y CSV actualizado.")
+        self.actualizar_info()
+
+    def _borrar_csv(self, tipo):
+        path = self._csv_path(tipo)
+        if os.path.exists(path):
+            os.remove(path)
+        self._actualizar_metadatos(tipo, [])
+
+    def limpiar_datos(self):
+        tipo = self.tipo_seleccionado.get()
+        if tipo in self.data:
+            if messagebox.askyesno("Confirmar", f"¿Eliminar TODOS los datasets de '{tipo}' y borrar el CSV?"):
+                del self.data[tipo]
+                self._borrar_csv(tipo)
+                self.status_var.set(f"🧹 Datos de '{tipo}' eliminados.")
+                self.actualizar_info()
+        else:
+            messagebox.showinfo("Sin datos", "No hay datos para limpiar.")
+
+    def ver_encabezados(self):
+        tipo = self.tipo_seleccionado.get()
+        canonicas = self.obtener_canonicas(tipo)
+        if canonicas is None:
+            messagebox.showinfo("Sin encabezados", f"No hay encabezados definidos para '{tipo}'.\nCargue el primer dataset.")
+        else:
+            win = tk.Toplevel(self.root)
+            win.title(f"🔍 Encabezados de {tipo}")
+            win.geometry("500x400")
+            win.configure(bg='white')
+            tk.Label(win, text=f"Columnas esperadas para {tipo}", font=('Segoe UI', 12, 'bold'),
+                     bg='white', fg=self.COLOR_PRIMARY).pack(pady=10)
+            texto = "\n".join(f"{i+1}. {col}" for i, col in enumerate(canonicas))
+            text_widget = tk.Text(win, wrap='word', font=('Consolas', 10), bg='white', relief='flat', padx=20, pady=10)
+            text_widget.insert('1.0', texto)
+            text_widget.config(state='disabled')
+            text_widget.pack(fill=tk.BOTH, expand=True)
+            ttk.Button(win, text="Cerrar", command=win.destroy).pack(pady=10)
+
+    def mostrar_acerca(self):
+        messagebox.showinfo("Acerca de",
+                            "Consolidador SNIES v3.7\n\n"
+                            "Mapeo inteligente de columnas (Levenshtein + Jaccard).\n"
+                            "Solo conserva las columnas maestras definidas.\n"
+                            "Carga eficiente con metadatos.\n"
+                            "Panel de resumen de datos.\n\n"
+                            "Desarrollado por: Asistente DeepSeek AI")
+
+    # Métodos auxiliares sin cambios (ya estaban en el código anterior)
     def obtener_canonicas(self, tipo):
         if tipo in self.FIXED_HEADERS:
             return self.FIXED_HEADERS[tipo]
@@ -366,34 +752,26 @@ class SNIESConsolidador:
             return self.data[tipo]["headers"]
         return None
 
-    def _seleccionar_hoja(self, archivo):
-        xls = pd.ExcelFile(archivo)
-        tipo = self.tipo_seleccionado.get()
-        canonicas = self.obtener_canonicas(tipo)
-        best_sheet = xls.sheet_names[0]
-        best_row = 0
-        best_score = -1
-        for sheet in xls.sheet_names:
-            try:
-                df_raw = pd.read_excel(archivo, sheet_name=sheet, header=None, nrows=20)
-                for i, row in df_raw.iterrows():
-                    non_null = row.dropna()
-                    if len(non_null) == 0:
-                        continue
-                    score = sum(1 for v in non_null if isinstance(v, str) and not v.replace('.','',1).isdigit())
-                    score += sum(len(str(v)) for v in non_null) / 10.0
-                    score -= sum(1 for v in non_null if isinstance(v, (int, float)) or (isinstance(v, str) and v.replace('.','',1).isdigit())) * 2
-                    if canonicas is not None and len(non_null) == len(canonicas):
-                        score += 10
-                    if score > best_score:
-                        best_score = score
-                        best_sheet = sheet
-                        best_row = i
-            except Exception:
-                continue
-        return best_sheet, best_row
+    def _detectar_fila_encabezado(self, archivo):
+        try:
+            df_raw = pd.read_excel(archivo, sheet_name=0, header=None, nrows=20)
+            best_row = 0
+            best_score = -1
+            for i, row in df_raw.iterrows():
+                non_null = row.dropna()
+                if len(non_null) == 0:
+                    continue
+                score = sum(1 for v in non_null if isinstance(v, str) and not v.replace('.','',1).isdigit())
+                score += sum(len(str(v)) for v in non_null) / 10.0
+                score -= sum(1 for v in non_null if isinstance(v, (int, float)) or (isinstance(v, str) and v.replace('.','',1).isdigit())) * 2
+                if score > best_score:
+                    best_score = score
+                    best_row = i
+            return best_row
+        except Exception:
+            return 0
 
-    def _extraer_año_interactivo(self, df):
+    def _extraer_año_desde_df(self, df):
         objetivos = ["año", "ano"]
         mejor_col = None
         mejor_sim = 0.0
@@ -404,88 +782,18 @@ class SNIESConsolidador:
                 if sim > mejor_sim:
                     mejor_sim = sim
                     mejor_col = col
-        if mejor_sim < 0.7 or mejor_col is None:
-            año_str = simpledialog.askstring("Año no detectado", "No se pudo detectar el año automáticamente.\nIngrese el año manualmente:")
-            if año_str is None:
-                return None
-            try:
-                return int(año_str)
-            except ValueError:
-                messagebox.showerror("Error", "Año inválido.")
-                return None
+        if mejor_sim < 0.7:
+            return None
         valores = df[mejor_col].dropna().unique()
         if len(valores) == 1:
+            try:
+                return int(float(valores[0]))
+            except:
+                return None
+        elif len(valores) > 1:
+            messagebox.showwarning("Año múltiple", f"Se encontraron varios años: {valores}. Se usará el primero.")
             return int(float(valores[0]))
-        else:
-            años_validos = [int(float(v)) for v in valores if str(v).replace('.','',1).isdigit()]
-            if not años_validos:
-                return None
-            if len(años_validos) == 1:
-                return años_validos[0]
-            ventana = tk.Toplevel(self.root)
-            ventana.title("Seleccionar año")
-            ventana.geometry("300x150")
-            ventana.configure(bg='white')
-            ventana.transient(self.root)
-            ventana.grab_set()
-            tk.Label(ventana, text="Se encontraron varios años.\nSeleccione el año correcto:", bg='white').pack(pady=10)
-            año_var = tk.StringVar()
-            cb = ttk.Combobox(ventana, textvariable=año_var, values=años_validos, state='readonly')
-            cb.pack(pady=5)
-            cb.set(años_validos[0])
-            resultado = [None]
-            def aceptar():
-                resultado[0] = año_var.get()
-                ventana.destroy()
-            def cancelar():
-                ventana.destroy()
-            btn_frame = ttk.Frame(ventana)
-            btn_frame.pack(pady=10)
-            ttk.Button(btn_frame, text="Aceptar", command=aceptar).pack(side='left', padx=5)
-            ttk.Button(btn_frame, text="Cancelar", command=cancelar).pack(side='left', padx=5)
-            ventana.wait_window()
-            if resultado[0] is not None:
-                return int(resultado[0])
-            else:
-                return None
-
-    def _limpiar_filas_finales(self, df):
-        """
-        Elimina filas al final del DataFrame que contienen notas, fuentes o celdas vacías.
-        Retorna el DataFrame limpio y el número de filas eliminadas.
-        """
-        filas_originales = len(df)
-        # Eliminar filas con palabras clave en la primera columna
-        patron_nota = re.compile(r'(fuente|nota|total|suma|promedio)', re.IGNORECASE)
-        filas_a_eliminar = []
-        for idx, row in df.iterrows():
-            primera_celda = str(row.iloc[0]) if len(row) > 0 else ""
-            if patron_nota.search(primera_celda):
-                filas_a_eliminar.append(idx)
-        if filas_a_eliminar:
-            df = df.drop(filas_a_eliminar)
-
-        # Eliminar filas del final donde la mayoría de celdas estén vacías
-        # o la primera columna tenga texto y el resto vacío.
-        umbral_vacio = 0.9  # Más del 90% de celdas vacías
-        filas_para_eliminar = []
-        for idx, row in reversed(list(df.iterrows())):
-            # Contar celdas no vacías
-            non_null = row.dropna()
-            proporcion_vacia = 1 - (len(non_null) / len(row)) if len(row) > 0 else 1.0
-            primera_es_texto = isinstance(row.iloc[0], str) and not row.iloc[0].replace('.','',1).isdigit()
-            if proporcion_vacia >= umbral_vacio or (primera_es_texto and len(non_null) <= 1):
-                filas_para_eliminar.append(idx)
-            else:
-                # Si encontramos una fila con datos suficientes, paramos la revisión hacia arriba
-                break
-        if filas_para_eliminar:
-            df = df.drop(filas_para_eliminar)
-
-        # Eliminar filas completamente vacías que puedan quedar
-        df = df.dropna(how='all')
-        filas_eliminadas = filas_originales - len(df)
-        return df, filas_eliminadas
+        return None
 
     def _confirmar_encabezados(self, columnas, archivo, año, titulo):
         win = tk.Toplevel(self.root)
@@ -547,367 +855,33 @@ class SNIESConsolidador:
 
         win.wait_window()
         return resultado.get()
-
-    def _csv_path(self, tipo):
-        nombre_archivo = tipo.replace(" ", "_") + ".csv"
-        return os.path.join(DATA_DIR, nombre_archivo)
-
-    @staticmethod
-    def _metadata_path():
-        return os.path.join(DATA_DIR, "metadata.csv")
-
-    def _actualizar_metadatos(self, tipo, datasets):
-        md_path = self._metadata_path()
-        if os.path.exists(md_path):
-            df_md = pd.read_csv(md_path, dtype=str, keep_default_na=False)
-        else:
-            df_md = pd.DataFrame(columns=["tipo", "año", "registros"])
-        df_md = df_md[df_md["tipo"] != tipo]
-        nuevas_filas = []
-        for ds in datasets:
-            nuevas_filas.append({"tipo": tipo, "año": str(ds["año"]), "registros": len(ds["filas"])})
-        if nuevas_filas:
-            df_new = pd.DataFrame(nuevas_filas)
-            df_md = pd.concat([df_md, df_new], ignore_index=True)
-        if df_md.empty:
-            if os.path.exists(md_path):
-                os.remove(md_path)
-        else:
-            df_md.to_csv(md_path, index=False, encoding="utf-8-sig")
-
-    def _actualizar_csv(self, tipo):
-        path = self._csv_path(tipo)
-        if tipo not in self.data or not self.data[tipo]["datasets"]:
-            if os.path.exists(path):
-                os.remove(path)
-            self._actualizar_metadatos(tipo, [])
-            return
-        headers = self.data[tipo]["headers"]
-        n_cols = len(headers)
-        todas_filas = []
-        for ds in self.data[tipo]["datasets"]:
-            for fila in ds["filas"]:
-                if len(fila) < n_cols:
-                    fila += [""] * (n_cols - len(fila))
-                elif len(fila) > n_cols:
-                    fila = fila[:n_cols]
-                fila = [limpiar_flotante(celda) for celda in fila]
-                todas_filas.append(fila)
-        df = pd.DataFrame(todas_filas, columns=headers)
-        for col in df.columns:
-            df[col] = df[col].astype(str).apply(limpiar_flotante)
-        if "Año" in df.columns:
-            df["Año"] = pd.to_numeric(df["Año"], errors='coerce').fillna(0).astype(int)
-        df.to_csv(path, index=False, encoding="utf-8-sig")
-        self._actualizar_metadatos(tipo, self.data[tipo]["datasets"])
-
-    def _cargar_datos_completos(self, tipo):
-        if tipo in self.data and self.data[tipo].get("datasets") and self.data[tipo]["datasets"][0].get("filas"):
-            return
-        path = self._csv_path(tipo)
-        if not os.path.exists(path):
-            return
-        try:
-            df = pd.read_csv(path, encoding='utf-8-sig', dtype=str, keep_default_na=False)
-            if df.empty:
-                return
-            canonicas = self.obtener_canonicas(tipo)
-            if canonicas is None:
-                canonicas = list(df.columns)
-            self.data[tipo] = {"headers": canonicas, "datasets": []}
-            if "Año" not in df.columns:
-                return
-            df["Año"] = pd.to_numeric(df["Año"], errors='coerce').fillna(0).astype(int)
-            df = df[df["Año"] != 0]
-            for año in sorted(df["Año"].unique()):
-                subdf = df[df["Año"] == año]
-                alineado = pd.DataFrame(columns=canonicas)
-                for col in canonicas:
-                    if col in subdf.columns:
-                        alineado[col] = subdf[col].values
-                    else:
-                        alineado[col] = ""
-                filas = alineado.values.tolist()
-                n_cols = len(canonicas)
-                for i in range(len(filas)):
-                    if len(filas[i]) < n_cols:
-                        filas[i] += [""] * (n_cols - len(filas[i]))
-                    elif len(filas[i]) > n_cols:
-                        filas[i] = filas[i][:n_cols]
-                self.data[tipo]["datasets"].append({
-                    "archivo": path,
-                    "año": int(año),
-                    "fila_inicio": None,
-                    "filas": filas
-                })
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron cargar los datos de {tipo}:\n{e}")
-
-    def cargar_csvs_existentes(self):
-        md_path = self._metadata_path()
-        if not os.path.exists(md_path):
-            return
-        try:
-            df_md = pd.read_csv(md_path, dtype=str)
-            for _, fila in df_md.iterrows():
-                tipo = fila["tipo"]
-                año = int(fila["año"])
-                registros = int(fila["registros"])
-                if tipo not in self.data:
-                    canonicas = self.obtener_canonicas(tipo)
-                    if canonicas is None:
-                        canonicas = []
-                    self.data[tipo] = {"headers": canonicas, "datasets": []}
-                self.data[tipo]["datasets"].append({
-                    "archivo": self._csv_path(tipo),
-                    "año": año,
-                    "fila_inicio": None,
-                    "filas": [],
-                    "registros": registros
-                })
-            self.status_var.set("Metadatos cargados correctamente.")
-        except Exception as e:
-            print(f"Error al leer metadatos: {e}")
-
-    def actualizar_info(self, *args):
-        for widget in self.scroll_frame.winfo_children():
-            widget.destroy()
-        tipo = self.tipo_seleccionado.get()
-        if tipo not in self.data or not self.data[tipo]["datasets"]:
-            lbl = ttk.Label(self.scroll_frame, text="No hay datasets cargados para este tipo.",
-                            background='white', font=('Segoe UI', 10))
-            lbl.pack(pady=20)
-            self.lbl_resumen.config(text="")
-            return
-        total_registros = 0
-        total_datasets = len(self.data[tipo]["datasets"])
-        for ds in self.data[tipo]["datasets"]:
-            if "registros" in ds and not ds["filas"]:
-                total_registros += ds["registros"]
-            else:
-                total_registros += len(ds["filas"])
-        self.lbl_resumen.config(text=f"📊 Total registros: {total_registros:,}  |  Datasets cargados: {total_datasets}")
-        for idx, ds in enumerate(self.data[tipo]["datasets"]):
-            self._crear_tarjeta_dataset(tipo, idx, ds)
-
-    def _crear_tarjeta_dataset(self, tipo, idx, ds):
-        card = tk.Frame(self.scroll_frame, bg='white', relief='solid', borderwidth=1,
-                        highlightbackground=self.COLOR_PRIMARY, highlightthickness=1)
-        card.pack(fill=tk.X, pady=5, padx=5, ipady=5)
-        nombre_archivo = os.path.basename(ds["archivo"]) if ds["archivo"] else f"{tipo}.csv"
-        if "registros" in ds and not ds["filas"]:
-            registros = ds["registros"]
-        else:
-            registros = len(ds["filas"])
-        texto = f"{nombre_archivo}  |  Año: {ds['año']}  |  Registros: {registros}"
-        lbl = tk.Label(card, text=texto, anchor='w', bg='white', fg=self.COLOR_PRIMARY,
-                       font=('Segoe UI', 10, 'bold'))
-        lbl.pack(side='left', padx=10, pady=8, fill=tk.X, expand=True)
-        btn_del = ttk.Button(card, text="🗑️ Eliminar",
-                             command=lambda t=tipo, i=idx: self.eliminar_dataset(t, i),
-                             style='Danger.TButton')
-        btn_del.pack(side='right', padx=5, pady=8)
-
-    def cargar_archivos(self):
-        archivos = filedialog.askopenfilenames(
-            title=f"Seleccionar archivos Excel de {self.tipo_seleccionado.get()}",
-            filetypes=[("Archivos Excel", "*.xlsx *.xls"), ("Todos los archivos", "*.*")]
-        )
-        if not archivos:
-            return
-        for archivo in archivos:
-            self.procesar_un_archivo(archivo)
-            self.root.update()
-
-    def procesar_un_archivo(self, archivo):
-        tipo = self.tipo_seleccionado.get()
-        nombre = os.path.basename(archivo)
-
-        self.status_var.set(f"Analizando: {nombre} (seleccionando hoja...)")
-        self.progress_var.set(5)
-        self.root.update()
-
-        sheet_name, fila_inicio = self._seleccionar_hoja(archivo)
-
-        try:
-            df_a2 = pd.read_excel(archivo, sheet_name=sheet_name, header=None, nrows=2)
-            titulo = str(df_a2.iloc[1, 0]) if df_a2.shape[0] > 1 else ""
-        except:
-            titulo = ""
-
-        try:
-            df_muestra = pd.read_excel(archivo, sheet_name=sheet_name, header=fila_inicio, nrows=100)
-            if df_muestra.empty:
-                messagebox.showwarning("Archivo vacío", f"{nombre}: no se encontraron datos en la hoja '{sheet_name}'.")
-                return
-            columnas_detectadas = [limpiar_nombre_columna(c) for c in df_muestra.columns]
-            año_preliminar = self._extraer_año_interactivo(df_muestra)
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
-            return
-
-        if not self._confirmar_encabezados(columnas_detectadas, archivo, año_preliminar, titulo):
-            self.status_var.set(f"Cancelado: {nombre}")
-            self.progress_var.set(0)
-            return
-
-        self.progress_var.set(30)
-        self.status_var.set(f"Procesando: {nombre} (hoja '{sheet_name}')")
-        self.root.update()
-
-        try:
-            df = pd.read_excel(archivo, sheet_name=sheet_name, header=fila_inicio)
-            df.dropna(how="all", axis=1, inplace=True)
-            df.dropna(how="all", axis=0, inplace=True)
-
-            # Limpieza automática de filas finales
-            df, filas_eliminadas = self._limpiar_filas_finales(df)
-
-            if df.empty:
-                messagebox.showwarning("Sin datos", f"{nombre}: no hay datos después de la limpieza.")
-                return
-
-            if filas_eliminadas > 0:
-                self.status_var.set(f"Procesando: {nombre} (se eliminaron {filas_eliminadas} filas de notas)")
-
-            self._cargar_datos_completos(tipo)
-
-            nuevas_raw = list(df.columns)
-            canonicas = self.obtener_canonicas(tipo)
-            if canonicas is None:
-                canonicas = [limpiar_nombre_columna(c) for c in nuevas_raw]
-
-            mapeo = mapear_columnas_expandible(canonicas, nuevas_raw)
-
-            df_consolidado = pd.DataFrame()
-            for i, col_canonica in enumerate(canonicas):
-                if mapeo.get(i) is not None:
-                    idx_nuevo = mapeo[i]
-                    df_consolidado[col_canonica] = df.iloc[:, idx_nuevo].values
-                else:
-                    df_consolidado[col_canonica] = pd.NA
-
-            for col in df_consolidado.columns:
-                if col != "Año":
-                    df_consolidado[col] = df_consolidado[col].astype(str).replace("<NA>", "")
-                    df_consolidado[col] = df_consolidado[col].apply(limpiar_flotante)
-
-            año = self._extraer_año_interactivo(df_consolidado)
-            if año is None:
-                messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
-                return
-            df_consolidado["Año"] = año
-
-            if tipo in self.data:
-                existente = next((ds for ds in self.data[tipo]["datasets"] if ds["año"] == año), None)
-                if existente is not None:
-                    if not messagebox.askyesno("Año duplicado",
-                                               f"Ya existen datos para el año {año} en '{tipo}'.\n¿Desea reemplazarlos?"):
-                        self.status_var.set(f"Omitido: {nombre} (año {año} ya existe)")
-                        return
-
-            nuevas_filas = df_consolidado.values.tolist()
-            n_cols = len(canonicas)
-            for i in range(len(nuevas_filas)):
-                if len(nuevas_filas[i]) < n_cols:
-                    nuevas_filas[i] += [""] * (n_cols - len(nuevas_filas[i]))
-                elif len(nuevas_filas[i]) > n_cols:
-                    nuevas_filas[i] = nuevas_filas[i][:n_cols]
-
-            if tipo not in self.data:
-                self.data[tipo] = {"headers": canonicas, "datasets": []}
-
-            datasets = self.data[tipo]["datasets"]
-            ds_existente = next((ds for ds in datasets if ds["año"] == año), None)
-            if ds_existente:
-                ds_existente["archivo"] = archivo
-                ds_existente["fila_inicio"] = fila_inicio
-                ds_existente["filas"] = nuevas_filas
-                ds_existente.pop("registros", None)
-            else:
-                datasets.append({
-                    "archivo": archivo,
-                    "año": año,
-                    "fila_inicio": fila_inicio,
-                    "filas": nuevas_filas
-                })
-
-            self._actualizar_csv(tipo)
-            self.progress_var.set(100)
-            self.status_var.set(f"✔ {nombre} cargado (Año {año})")
-            self.actualizar_info()
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Error al procesar {nombre}:\n{e}")
-
-    def eliminar_dataset(self, tipo, idx):
-        if not messagebox.askyesno("Eliminar dataset", "¿Está seguro de eliminar este dataset?\nSe borrarán sus registros del CSV maestro."):
-            return
-        self._cargar_datos_completos(tipo)
-        del self.data[tipo]["datasets"][idx]
-        if not self.data[tipo]["datasets"]:
-            del self.data[tipo]
-        self._actualizar_csv(tipo) if tipo in self.data else self._borrar_csv(tipo)
-        self.status_var.set("🗑️ Dataset eliminado y CSV actualizado.")
-        self.actualizar_info()
-
-    def _borrar_csv(self, tipo):
-        path = self._csv_path(tipo)
-        if os.path.exists(path):
-            os.remove(path)
-        self._actualizar_metadatos(tipo, [])
-
-    def limpiar_datos(self):
-        tipo = self.tipo_seleccionado.get()
-        if tipo in self.data:
-            if messagebox.askyesno("Confirmar", f"¿Eliminar TODOS los datasets de '{tipo}' y borrar el CSV?"):
-                del self.data[tipo]
-                self._borrar_csv(tipo)
-                self.status_var.set(f"🧹 Datos de '{tipo}' eliminados.")
-                self.actualizar_info()
-        else:
-            messagebox.showinfo("Sin datos", "No hay datos para limpiar.")
-
+    
     def abrir_preprocesamiento(self):
+        """Abre la ventana de preprocesamiento para el tipo actual."""
         tipo = self.tipo_seleccionado.get()
         path_csv = self._csv_path(tipo)
         if not os.path.exists(path_csv):
             messagebox.showinfo("Sin datos", f"No existe el archivo maestro para '{tipo}'.\nCargue al menos un dataset primero.")
             return
-        from preprocesamiento import VentanaPreprocesamiento
         VentanaPreprocesamiento(self.root, tipo, path_csv, app=self)
 
-    def ver_encabezados(self):
+    def preprocesar_csv_actual(self):
+        """Aplica limpieza base al CSV del tipo seleccionado sin abrir la ventana de edición."""
         tipo = self.tipo_seleccionado.get()
-        canonicas = self.obtener_canonicas(tipo)
-        if canonicas is None:
-            messagebox.showinfo("Sin encabezados", f"No hay encabezados definidos para '{tipo}'.\nCargue el primer dataset.")
-        else:
-            win = tk.Toplevel(self.root)
-            win.title(f"🔍 Encabezados de {tipo}")
-            win.geometry("500x400")
-            win.configure(bg='white')
-            tk.Label(win, text=f"Columnas esperadas para {tipo}", font=('Segoe UI', 12, 'bold'),
-                     bg='white', fg=self.COLOR_PRIMARY).pack(pady=10)
-            texto = "\n".join(f"{i+1}. {col}" for i, col in enumerate(canonicas))
-            text_widget = tk.Text(win, wrap='word', font=('Consolas', 10), bg='white', relief='flat', padx=20, pady=10)
-            text_widget.insert('1.0', texto)
-            text_widget.config(state='disabled')
-            text_widget.pack(fill=tk.BOTH, expand=True)
-            ttk.Button(win, text="Cerrar", command=win.destroy).pack(pady=10)
-
-    def mostrar_acerca(self):
-        messagebox.showinfo("Acerca de",
-                            "Consolidador SNIES v3.9\n\n"
-                            "Mapeo inteligente de columnas (Levenshtein + Jaccard).\n"
-                            "Solo conserva las columnas maestras definidas.\n"
-                            "Carga eficiente con metadatos.\n"
-                            "Panel de resumen de datos.\n"
-                            "Emparejamiento forzado de Sexo/Género (ignora IDs).\n"
-                            "Detección interactiva de año.\n"
-                            "Limpieza automática de filas de notas.\n"
-                            "Eliminación de sufijos '.0' en valores enteros.\n\n"
-                            "Desarrollado por: Asistente DeepSeek AI")
+        path_csv = self._csv_path(tipo)
+        if not os.path.exists(path_csv):
+            messagebox.showinfo("Sin datos", f"No existe el archivo maestro para '{tipo}'.\nCargue al menos un dataset primero.")
+            return
+        if not messagebox.askyesno("Confirmar", "Se aplicará preprocesamiento base al CSV actual.\n¿Desea continuar?"):
+            return
+        try:
+            df = preprocesar_csv_maestro(path_csv)
+            self._cargar_datos_completos(tipo)
+            self.actualizar_info()
+            self.status_var.set(f"CSV preprocesado: {len(df)} filas en '{tipo}'.")
+            messagebox.showinfo("Preprocesamiento", "El CSV maestro fue preprocesado correctamente.")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo preprocesar el CSV:\n{e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
