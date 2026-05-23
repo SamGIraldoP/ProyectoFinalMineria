@@ -359,6 +359,20 @@ class SNIESConsolidador:
         main_frame.rowconfigure(1, weight=1)
 
     # ---------- Utilidades de datos ----------
+
+    def _get_año_col_name(self, df):
+        """
+        BUG FIX 1: Busca dinámicamente la columna de año en un DataFrame,
+        sin importar si se llama "Año", "AÑO", "Ano", etc.
+        El código original usaba 'Año' hardcodeado, lo que rompía todos los
+        tipos de dataset que usan 'AÑO' en mayúsculas (Admitidos, Inscritos,
+        Graduados, Primer Curso).
+        """
+        for col in df.columns:
+            if normalizar_para_match(col) in ("año", "ano"):
+                return col
+        return None
+
     def obtener_canonicas(self, tipo):
         if tipo in self.FIXED_HEADERS:
             return self.FIXED_HEADERS[tipo]
@@ -450,12 +464,7 @@ class SNIESConsolidador:
                 return None
 
     def _limpiar_filas_finales(self, df):
-        """
-        Elimina filas al final del DataFrame que contienen notas, fuentes o celdas vacías.
-        Retorna el DataFrame limpio y el número de filas eliminadas.
-        """
         filas_originales = len(df)
-        # Eliminar filas con palabras clave en la primera columna
         patron_nota = re.compile(r'(fuente|nota|total|suma|promedio)', re.IGNORECASE)
         filas_a_eliminar = []
         for idx, row in df.iterrows():
@@ -465,24 +474,19 @@ class SNIESConsolidador:
         if filas_a_eliminar:
             df = df.drop(filas_a_eliminar)
 
-        # Eliminar filas del final donde la mayoría de celdas estén vacías
-        # o la primera columna tenga texto y el resto vacío.
-        umbral_vacio = 0.9  # Más del 90% de celdas vacías
+        umbral_vacio = 0.9
         filas_para_eliminar = []
         for idx, row in reversed(list(df.iterrows())):
-            # Contar celdas no vacías
             non_null = row.dropna()
             proporcion_vacia = 1 - (len(non_null) / len(row)) if len(row) > 0 else 1.0
             primera_es_texto = isinstance(row.iloc[0], str) and not row.iloc[0].replace('.','',1).isdigit()
             if proporcion_vacia >= umbral_vacio or (primera_es_texto and len(non_null) <= 1):
                 filas_para_eliminar.append(idx)
             else:
-                # Si encontramos una fila con datos suficientes, paramos la revisión hacia arriba
                 break
         if filas_para_eliminar:
             df = df.drop(filas_para_eliminar)
 
-        # Eliminar filas completamente vacías que puedan quedar
         df = df.dropna(how='all')
         filas_eliminadas = filas_originales - len(df)
         return df, filas_eliminadas
@@ -596,14 +600,30 @@ class SNIESConsolidador:
         df = pd.DataFrame(todas_filas, columns=headers)
         for col in df.columns:
             df[col] = df[col].astype(str).apply(limpiar_flotante)
-        if "Año" in df.columns:
-            df["Año"] = pd.to_numeric(df["Año"], errors='coerce').fillna(0).astype(int)
+
+        # BUG FIX 1 (parte de _actualizar_csv):
+        # Antes: if "Año" in df.columns → fallaba para tipos con columna "AÑO"
+        # Ahora: buscamos la columna de año dinámicamente con el helper
+        año_col = self._get_año_col_name(df)
+        if año_col:
+            df[año_col] = pd.to_numeric(df[año_col], errors='coerce').fillna(0).astype(int)
+
         df.to_csv(path, index=False, encoding="utf-8-sig")
         self._actualizar_metadatos(tipo, self.data[tipo]["datasets"])
 
     def _cargar_datos_completos(self, tipo):
-        if tipo in self.data and self.data[tipo].get("datasets") and self.data[tipo]["datasets"][0].get("filas"):
-            return
+        """
+        BUG FIX 2: Condición de retorno temprano corregida.
+        Antes: solo comprobaba si el PRIMER dataset tenía filas.
+        Si había datasets en estado mixto (unos con filas, otros vacíos de metadata),
+        el método retornaba sin cargar los que estaban vacíos. Al eliminar o actualizar
+        el CSV, esos años se perdían.
+        Ahora: solo omite la recarga si TODOS los datasets tienen filas reales.
+        """
+        if tipo in self.data and self.data[tipo].get("datasets"):
+            if all(len(ds.get("filas", [])) > 0 for ds in self.data[tipo]["datasets"]):
+                return
+
         path = self._csv_path(tipo)
         if not os.path.exists(path):
             return
@@ -615,18 +635,29 @@ class SNIESConsolidador:
             if canonicas is None:
                 canonicas = list(df.columns)
             self.data[tipo] = {"headers": canonicas, "datasets": []}
-            if "Año" not in df.columns:
+
+            # BUG FIX 1 (parte de _cargar_datos_completos):
+            # Antes: if "Año" not in df.columns: return
+            # Eso hacía que tipos con columna "AÑO" (mayúsculas) nunca se cargaran,
+            # dejando self.data[tipo]["datasets"] vacío y borrando los datos en memoria.
+            # Ahora: buscamos la columna de año dinámicamente.
+            año_col = self._get_año_col_name(df)
+            if año_col is None:
                 return
-            df["Año"] = pd.to_numeric(df["Año"], errors='coerce').fillna(0).astype(int)
-            df = df[df["Año"] != 0]
-            for año in sorted(df["Año"].unique()):
-                subdf = df[df["Año"] == año]
-                alineado = pd.DataFrame(columns=canonicas)
+
+            df[año_col] = pd.to_numeric(df[año_col], errors='coerce').fillna(0).astype(int)
+            df = df[df[año_col] != 0]
+
+            for año in sorted(df[año_col].unique()):
+                subdf = df[df[año_col] == año].reset_index(drop=True)
+                # Alineamos el subdf con las columnas canónicas
+                alineado = pd.DataFrame(index=range(len(subdf)), columns=canonicas)
                 for col in canonicas:
                     if col in subdf.columns:
                         alineado[col] = subdf[col].values
                     else:
                         alineado[col] = ""
+                alineado = alineado.fillna("")
                 filas = alineado.values.tolist()
                 n_cols = len(canonicas)
                 for i in range(len(filas)):
@@ -662,7 +693,7 @@ class SNIESConsolidador:
                     "archivo": self._csv_path(tipo),
                     "año": año,
                     "fila_inicio": None,
-                    "filas": [],
+                    "filas": [],              # sin datos reales
                     "registros": registros
                 })
             self.status_var.set("Metadatos cargados correctamente.")
@@ -760,7 +791,6 @@ class SNIESConsolidador:
             df.dropna(how="all", axis=1, inplace=True)
             df.dropna(how="all", axis=0, inplace=True)
 
-            # Limpieza automática de filas finales
             df, filas_eliminadas = self._limpiar_filas_finales(df)
 
             if df.empty:
@@ -770,6 +800,7 @@ class SNIESConsolidador:
             if filas_eliminadas > 0:
                 self.status_var.set(f"Procesando: {nombre} (se eliminaron {filas_eliminadas} filas de notas)")
 
+            # Forzar recarga completa si algún dataset no tiene datos reales en memoria
             self._cargar_datos_completos(tipo)
 
             nuevas_raw = list(df.columns)
@@ -788,23 +819,33 @@ class SNIESConsolidador:
                     df_consolidado[col_canonica] = pd.NA
 
             for col in df_consolidado.columns:
-                if col != "Año":
-                    df_consolidado[col] = df_consolidado[col].astype(str).replace("<NA>", "")
-                    df_consolidado[col] = df_consolidado[col].apply(limpiar_flotante)
+                df_consolidado[col] = df_consolidado[col].astype(str).replace("<NA>", "")
+                df_consolidado[col] = df_consolidado[col].apply(limpiar_flotante)
 
-            año = self._extraer_año_interactivo(df_consolidado)
+            # BUG FIX 3: El código original llamaba _extraer_año_interactivo por segunda vez
+            # sobre df_consolidado. Si la columna de año tenía pd.NA (no mapeada), retornaba
+            # None y abortaba la carga. Además, asignaba siempre a "Año" (minúsculas) aunque
+            # la columna canónica fuera "AÑO", generando columnas duplicadas o datos perdidos.
+            # Ahora: usamos año_preliminar (ya confirmado por el usuario) y lo asignamos
+            # a la columna canónica correcta según el tipo de dataset.
+            año = año_preliminar
             if año is None:
                 messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
                 return
-            df_consolidado["Año"] = año
 
-            if tipo in self.data:
-                existente = next((ds for ds in self.data[tipo]["datasets"] if ds["año"] == año), None)
-                if existente is not None:
-                    if not messagebox.askyesno("Año duplicado",
-                                               f"Ya existen datos para el año {año} en '{tipo}'.\n¿Desea reemplazarlos?"):
-                        self.status_var.set(f"Omitido: {nombre} (año {año} ya existe)")
-                        return
+            # Encontrar el nombre exacto de la columna de año en las cabeceras canónicas
+            año_col_canonico = self._get_año_col_name(df_consolidado)
+            if año_col_canonico:
+                df_consolidado[año_col_canonico] = año
+
+            # Verificar duplicado exacto (comparando enteros)
+            existente = next((ds for ds in self.data.get(tipo, {}).get("datasets", [])
+                              if int(ds["año"]) == int(año)), None)
+            if existente is not None:
+                if not messagebox.askyesno("Año duplicado",
+                                           f"Ya existen datos para el año {año} en '{tipo}'.\n¿Desea reemplazarlos?"):
+                    self.status_var.set(f"Omitido: {nombre} (año {año} ya existe)")
+                    return
 
             nuevas_filas = df_consolidado.values.tolist()
             n_cols = len(canonicas)
@@ -818,7 +859,7 @@ class SNIESConsolidador:
                 self.data[tipo] = {"headers": canonicas, "datasets": []}
 
             datasets = self.data[tipo]["datasets"]
-            ds_existente = next((ds for ds in datasets if ds["año"] == año), None)
+            ds_existente = next((ds for ds in datasets if int(ds["año"]) == int(año)), None)
             if ds_existente:
                 ds_existente["archivo"] = archivo
                 ds_existente["fila_inicio"] = fila_inicio
@@ -843,12 +884,41 @@ class SNIESConsolidador:
     def eliminar_dataset(self, tipo, idx):
         if not messagebox.askyesno("Eliminar dataset", "¿Está seguro de eliminar este dataset?\nSe borrarán sus registros del CSV maestro."):
             return
+
+        if tipo not in self.data or idx >= len(self.data[tipo]["datasets"]):
+            messagebox.showerror("Error", "El dataset ya no existe.")
+            return
+        try:
+            año_a_eliminar = int(self.data[tipo]["datasets"][idx]["año"])
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "El año del dataset es inválido.")
+            return
+
+        # BUG FIX 2 (parte de eliminar_dataset):
+        # _cargar_datos_completos ahora garantiza que TODOS los datasets tengan
+        # filas reales antes de modificar o escribir el CSV, evitando la pérdida
+        # de datos de años que solo existían como metadatos (filas=[]).
         self._cargar_datos_completos(tipo)
-        del self.data[tipo]["datasets"][idx]
-        if not self.data[tipo]["datasets"]:
+
+        datasets = self.data[tipo]["datasets"]
+        indice_real = None
+        for i, ds in enumerate(datasets):
+            if int(ds["año"]) == año_a_eliminar:
+                indice_real = i
+                break
+
+        if indice_real is None:
+            messagebox.showerror("Error", "No se encontró el dataset del año especificado.")
+            return
+
+        del datasets[indice_real]
+        if not datasets:
             del self.data[tipo]
-        self._actualizar_csv(tipo) if tipo in self.data else self._borrar_csv(tipo)
-        self.status_var.set("🗑️ Dataset eliminado y CSV actualizado.")
+            self._borrar_csv(tipo)
+            self.status_var.set("🗑️ Dataset eliminado y CSV actualizado.")
+        else:
+            self._actualizar_csv(tipo)
+            self.status_var.set("🗑️ Dataset eliminado y CSV actualizado.")
         self.actualizar_info()
 
     def _borrar_csv(self, tipo):
@@ -898,16 +968,19 @@ class SNIESConsolidador:
 
     def mostrar_acerca(self):
         messagebox.showinfo("Acerca de",
-                            "Consolidador SNIES v3.9\n\n"
+                            "Consolidador SNIES v3.9 (corregido)\n\n"
                             "Mapeo inteligente de columnas (Levenshtein + Jaccard).\n"
                             "Solo conserva las columnas maestras definidas.\n"
                             "Carga eficiente con metadatos.\n"
                             "Panel de resumen de datos.\n"
-                            "Emparejamiento forzado de Sexo-Género (ignora IDs).\n"
+                            "Emparejamiento forzado de Sexo/Género (ignora IDs).\n"
                             "Detección interactiva de año.\n"
                             "Limpieza automática de filas de notas.\n"
                             "Eliminación de sufijos '.0' en valores enteros.\n\n"
-                            "Desarrollado por: Asistente DeepSeek AI")
+                            "Correcciones aplicadas:\n"
+                            "• Detección dinámica de columna de año (Año/AÑO)\n"
+                            "• Eliminación de segunda extracción de año redundante\n"
+                            "• Recarga completa de datos antes de eliminar")
 
 if __name__ == "__main__":
     root = tk.Tk()
