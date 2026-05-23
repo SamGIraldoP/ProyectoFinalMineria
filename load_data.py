@@ -308,7 +308,7 @@ class SNIESConsolidador:
 
         btn_cargar = ttk.Button(acciones_card, text="📂 Cargar Excel(s)", command=self.cargar_archivos, style='Primary.TButton')
         btn_cargar.pack(fill=tk.X, pady=2)
-        ToolTip(btn_cargar, "Selecciona uno o varios archivos Excel para cargar")
+        ToolTip(btn_cargar, "Selecciona uno o varios archivos Excel para cargar. Si seleccionas varios, puedes omitir la confirmación individual.")
 
         btn_preprocesar = ttk.Button(acciones_card, text="🧹 Preprocesar CSV", command=self.abrir_preprocesamiento, style='Warning.TButton')
         btn_preprocesar.pack(fill=tk.X, pady=2)
@@ -361,13 +361,6 @@ class SNIESConsolidador:
     # ---------- Utilidades de datos ----------
 
     def _get_año_col_name(self, df):
-        """
-        BUG FIX 1: Busca dinámicamente la columna de año en un DataFrame,
-        sin importar si se llama "Año", "AÑO", "Ano", etc.
-        El código original usaba 'Año' hardcodeado, lo que rompía todos los
-        tipos de dataset que usan 'AÑO' en mayúsculas (Admitidos, Inscritos,
-        Graduados, Primer Curso).
-        """
         for col in df.columns:
             if normalizar_para_match(col) in ("año", "ano"):
                 return col
@@ -601,9 +594,6 @@ class SNIESConsolidador:
         for col in df.columns:
             df[col] = df[col].astype(str).apply(limpiar_flotante)
 
-        # BUG FIX 1 (parte de _actualizar_csv):
-        # Antes: if "Año" in df.columns → fallaba para tipos con columna "AÑO"
-        # Ahora: buscamos la columna de año dinámicamente con el helper
         año_col = self._get_año_col_name(df)
         if año_col:
             df[año_col] = pd.to_numeric(df[año_col], errors='coerce').fillna(0).astype(int)
@@ -612,14 +602,6 @@ class SNIESConsolidador:
         self._actualizar_metadatos(tipo, self.data[tipo]["datasets"])
 
     def _cargar_datos_completos(self, tipo):
-        """
-        BUG FIX 2: Condición de retorno temprano corregida.
-        Antes: solo comprobaba si el PRIMER dataset tenía filas.
-        Si había datasets en estado mixto (unos con filas, otros vacíos de metadata),
-        el método retornaba sin cargar los que estaban vacíos. Al eliminar o actualizar
-        el CSV, esos años se perdían.
-        Ahora: solo omite la recarga si TODOS los datasets tienen filas reales.
-        """
         if tipo in self.data and self.data[tipo].get("datasets"):
             if all(len(ds.get("filas", [])) > 0 for ds in self.data[tipo]["datasets"]):
                 return
@@ -636,11 +618,6 @@ class SNIESConsolidador:
                 canonicas = list(df.columns)
             self.data[tipo] = {"headers": canonicas, "datasets": []}
 
-            # BUG FIX 1 (parte de _cargar_datos_completos):
-            # Antes: if "Año" not in df.columns: return
-            # Eso hacía que tipos con columna "AÑO" (mayúsculas) nunca se cargaran,
-            # dejando self.data[tipo]["datasets"] vacío y borrando los datos en memoria.
-            # Ahora: buscamos la columna de año dinámicamente.
             año_col = self._get_año_col_name(df)
             if año_col is None:
                 return
@@ -650,7 +627,6 @@ class SNIESConsolidador:
 
             for año in sorted(df[año_col].unique()):
                 subdf = df[df[año_col] == año].reset_index(drop=True)
-                # Alineamos el subdf con las columnas canónicas
                 alineado = pd.DataFrame(index=range(len(subdf)), columns=canonicas)
                 for col in canonicas:
                     if col in subdf.columns:
@@ -693,7 +669,7 @@ class SNIESConsolidador:
                     "archivo": self._csv_path(tipo),
                     "año": año,
                     "fila_inicio": None,
-                    "filas": [],              # sin datos reales
+                    "filas": [],
                     "registros": registros
                 })
             self.status_var.set("Metadatos cargados correctamente.")
@@ -734,6 +710,12 @@ class SNIESConsolidador:
         lbl = tk.Label(card, text=texto, anchor='w', bg='white', fg=self.COLOR_PRIMARY,
                        font=('Segoe UI', 10, 'bold'))
         lbl.pack(side='left', padx=10, pady=8, fill=tk.X, expand=True)
+
+        btn_preview = ttk.Button(card, text="👁️ Vista previa",
+                                 command=lambda t=tipo, a=ds['año']: self.previsualizar_datos_año(t, a),
+                                 style='Accent.TButton')
+        btn_preview.pack(side='right', padx=5, pady=8)
+
         btn_del = ttk.Button(card, text="🗑️ Eliminar",
                              command=lambda t=tipo, i=idx: self.eliminar_dataset(t, i),
                              style='Danger.TButton')
@@ -746,11 +728,27 @@ class SNIESConsolidador:
         )
         if not archivos:
             return
+
+        # Si hay más de un archivo, preguntar si desea omitir la confirmación
+        if len(archivos) > 1:
+            respuesta = messagebox.askyesnocancel(
+                "Confirmación masiva",
+                "¿Desea omitir la confirmación de encabezados para todos los archivos?\n\n"
+                "• Sí: Cargar todos sin preguntar (se usará detección automática).\n"
+                "• No: Confirmar encabezados uno por uno.\n"
+                "• Cancelar: No cargar ningún archivo."
+            )
+            if respuesta is None:  # Cancelar
+                return
+            omitir_confirmacion = respuesta  # True = Sí, False = No
+        else:
+            omitir_confirmacion = False
+
         for archivo in archivos:
-            self.procesar_un_archivo(archivo)
+            self.procesar_un_archivo(archivo, confirmar=not omitir_confirmacion)
             self.root.update()
 
-    def procesar_un_archivo(self, archivo):
+    def procesar_un_archivo(self, archivo, confirmar=True):
         tipo = self.tipo_seleccionado.get()
         nombre = os.path.basename(archivo)
 
@@ -777,10 +775,21 @@ class SNIESConsolidador:
             messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
             return
 
-        if not self._confirmar_encabezados(columnas_detectadas, archivo, año_preliminar, titulo):
-            self.status_var.set(f"Cancelado: {nombre}")
-            self.progress_var.set(0)
-            return
+        # Si se requiere confirmación, mostrarla; si no, continuar si el año es válido
+        if confirmar:
+            if not self._confirmar_encabezados(columnas_detectadas, archivo, año_preliminar, titulo):
+                self.status_var.set(f"Cancelado: {nombre}")
+                self.progress_var.set(0)
+                return
+        else:
+            # Sin confirmación, solo verificar que el año esté presente; si no, preguntar igualmente
+            if año_preliminar is None:
+                # Intentar extraer año de nuevo o preguntar manualmente
+                año_preliminar = self._extraer_año_interactivo(df_muestra)
+                if año_preliminar is None:
+                    self.status_var.set(f"Omitido: {nombre} (no se pudo determinar el año)")
+                    self.progress_var.set(0)
+                    return
 
         self.progress_var.set(30)
         self.status_var.set(f"Procesando: {nombre} (hoja '{sheet_name}')")
@@ -800,7 +809,6 @@ class SNIESConsolidador:
             if filas_eliminadas > 0:
                 self.status_var.set(f"Procesando: {nombre} (se eliminaron {filas_eliminadas} filas de notas)")
 
-            # Forzar recarga completa si algún dataset no tiene datos reales en memoria
             self._cargar_datos_completos(tipo)
 
             nuevas_raw = list(df.columns)
@@ -822,23 +830,15 @@ class SNIESConsolidador:
                 df_consolidado[col] = df_consolidado[col].astype(str).replace("<NA>", "")
                 df_consolidado[col] = df_consolidado[col].apply(limpiar_flotante)
 
-            # BUG FIX 3: El código original llamaba _extraer_año_interactivo por segunda vez
-            # sobre df_consolidado. Si la columna de año tenía pd.NA (no mapeada), retornaba
-            # None y abortaba la carga. Además, asignaba siempre a "Año" (minúsculas) aunque
-            # la columna canónica fuera "AÑO", generando columnas duplicadas o datos perdidos.
-            # Ahora: usamos año_preliminar (ya confirmado por el usuario) y lo asignamos
-            # a la columna canónica correcta según el tipo de dataset.
             año = año_preliminar
             if año is None:
                 messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
                 return
 
-            # Encontrar el nombre exacto de la columna de año en las cabeceras canónicas
             año_col_canonico = self._get_año_col_name(df_consolidado)
             if año_col_canonico:
                 df_consolidado[año_col_canonico] = año
 
-            # Verificar duplicado exacto (comparando enteros)
             existente = next((ds for ds in self.data.get(tipo, {}).get("datasets", [])
                               if int(ds["año"]) == int(año)), None)
             if existente is not None:
@@ -894,10 +894,6 @@ class SNIESConsolidador:
             messagebox.showerror("Error", "El año del dataset es inválido.")
             return
 
-        # BUG FIX 2 (parte de eliminar_dataset):
-        # _cargar_datos_completos ahora garantiza que TODOS los datasets tengan
-        # filas reales antes de modificar o escribir el CSV, evitando la pérdida
-        # de datos de años que solo existían como metadatos (filas=[]).
         self._cargar_datos_completos(tipo)
 
         datasets = self.data[tipo]["datasets"]
@@ -966,21 +962,78 @@ class SNIESConsolidador:
             text_widget.pack(fill=tk.BOTH, expand=True)
             ttk.Button(win, text="Cerrar", command=win.destroy).pack(pady=10)
 
+    def previsualizar_datos_año(self, tipo, año):
+        """Muestra una vista previa de los datos de un año específico del CSV maestro."""
+        path = self._csv_path(tipo)
+        if not os.path.exists(path):
+            messagebox.showerror("Error", f"No se encontró el archivo {os.path.basename(path)}.")
+            return
+        try:
+            df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding='utf-8-sig')
+            año_col = self._get_año_col_name(df)
+            if año_col is None:
+                messagebox.showerror("Error", "No se encontró la columna de año en el archivo.")
+                return
+            df = df[df[año_col] == str(año)]
+            if df.empty:
+                messagebox.showinfo("Sin datos", f"No hay registros para el año {año}.")
+                return
+            df_preview = df.head(20)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"👁️ Vista previa - {tipo} ({año})")
+        win.geometry("1000x500")
+        win.configure(bg='white')
+
+        lbl_title = tk.Label(win,
+                             text=f"Primeros {len(df_preview)} registros del año {año} en {os.path.basename(path)}",
+                             font=('Segoe UI', 12, 'bold'), bg='white', fg=self.COLOR_PRIMARY)
+        lbl_title.pack(pady=10)
+
+        frame_tree = tk.Frame(win, bg='white')
+        frame_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        vsb = ttk.Scrollbar(frame_tree, orient="vertical")
+        hsb = ttk.Scrollbar(frame_tree, orient="horizontal")
+
+        tree = ttk.Treeview(frame_tree, yscrollcommand=vsb.set, xscrollcommand=hsb.set,
+                            columns=list(df_preview.columns), show='headings')
+        vsb.config(command=tree.yview)
+        hsb.config(command=tree.xview)
+
+        for col in df_preview.columns:
+            tree.heading(col, text=col)
+            width = max(len(col) * 10, 100)
+            tree.column(col, width=width, anchor='w', stretch=False)
+
+        for _, row in df_preview.iterrows():
+            tree.insert('', 'end', values=row.tolist())
+
+        tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+        frame_tree.grid_rowconfigure(0, weight=1)
+        frame_tree.grid_columnconfigure(0, weight=1)
+
+        btn_close = ttk.Button(win, text="Cerrar", command=win.destroy, style='Primary.TButton')
+        btn_close.pack(pady=10)
+
     def mostrar_acerca(self):
         messagebox.showinfo("Acerca de",
-                            "Consolidador SNIES v3.9 (corregido)\n\n"
+                            "Consolidador SNIES v4.1\n\n"
                             "Mapeo inteligente de columnas (Levenshtein + Jaccard).\n"
                             "Solo conserva las columnas maestras definidas.\n"
                             "Carga eficiente con metadatos.\n"
                             "Panel de resumen de datos.\n"
-                            "Emparejamiento forzado de Sexo/Género (ignora IDs).\n"
-                            "Detección interactiva de año.\n"
-                            "Limpieza automática de filas de notas.\n"
-                            "Eliminación de sufijos '.0' en valores enteros.\n\n"
+                            "Vista previa por año desde cada tarjeta.\n"
+                            "Carga masiva opcional sin confirmación individual.\n\n"
                             "Correcciones aplicadas:\n"
                             "• Detección dinámica de columna de año (Año/AÑO)\n"
-                            "• Eliminación de segunda extracción de año redundante\n"
-                            "• Recarga completa de datos antes de eliminar")
+                            "• Recarga completa de datos antes de eliminar\n"
+                            "• Previsualización directa por año")
 
 if __name__ == "__main__":
     root = tk.Tk()
