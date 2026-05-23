@@ -32,6 +32,15 @@ def levenshtein_ratio(s1: str, s2: str) -> float:
 
 
 class VentanaPreprocesamiento:
+    _PATRONES_MASCULINO = [
+        "masculino", "hombre", "male", "varon", "masc", "m", "h",
+        "masculino (hombre)", "hombre (masculino)"
+    ]
+    _PATRONES_FEMENINO = [
+        "femenino", "mujer", "female", "fem", "f", "w", "muj",
+        "femenino (mujer)", "mujer (femenino)"
+    ]
+
     def __init__(self, parent, tipo, csv_path, app=None):
         self.parent = parent
         self.tipo = tipo
@@ -56,9 +65,9 @@ class VentanaPreprocesamiento:
         ttk.Label(toolbar, text=f"Archivo: {os.path.basename(self.csv_path)}",
                   font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(toolbar, text="Quitar filas vacías (todo)",
+        ttk.Button(toolbar, text="Quitar filas vacías",
                    command=self.quitar_filas_vacias, style='Primary.TButton').pack(side=tk.LEFT, padx=5)
-        ttk.Button(toolbar, text="Convertir tipos (todo)",
+        ttk.Button(toolbar, text="Convertir tipos",
                    command=self.convertir_tipos, style='Primary.TButton').pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
@@ -71,6 +80,11 @@ class VentanaPreprocesamiento:
 
         ttk.Button(toolbar, text="Aplicar limpieza al ámbito",
                    command=self.aplicar_limpieza_ambito, style='Accent.TButton').pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
+
+        ttk.Button(toolbar, text="Normalizar sexo/género",
+                   command=self.normalizar_sexo_ambito, style='Accent.TButton').pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
 
@@ -177,6 +191,46 @@ class VentanaPreprocesamiento:
             df[col] = df[col].apply(self._normalizar_texto)
         return df
 
+    # ---------- Normalización de sexo/género ----------
+    def _mapear_sexo(self, valor):
+        limpio = limpiar_texto_para_match(valor)
+        if not limpio:
+            return valor
+        mejor_sim_m = max((levenshtein_ratio(limpio, limpiar_texto_para_match(p)), p) for p in self._PATRONES_MASCULINO)
+        mejor_sim_f = max((levenshtein_ratio(limpio, limpiar_texto_para_match(p)), p) for p in self._PATRONES_FEMENINO)
+        umbral_sexo = 0.7
+        if mejor_sim_m[0] >= umbral_sexo and mejor_sim_m[0] > mejor_sim_f[0]:
+            return "Masculino"
+        if mejor_sim_f[0] >= umbral_sexo and mejor_sim_f[0] > mejor_sim_m[0]:
+            return "Femenino"
+        return valor
+
+    def _normalizar_sexo_df(self, df):
+        cols_sexo = [col for col in df.columns if any(p in col.lower() for p in ['sexo', 'genero'])]
+        for col in cols_sexo:
+            df[col] = df[col].apply(lambda x: self._mapear_sexo(x) if pd.notna(x) and x != '' else x)
+        return df
+
+    def normalizar_sexo_ambito(self):
+        if self.df is None: return
+        seleccion = self.año_seleccionado.get()
+        msg = "Se normalizarán los valores de sexo/género en el ámbito seleccionado."
+        if not messagebox.askyesno("Normalizar sexo/género", msg):
+            return
+        sub, mask = self._obtener_subconjunto()
+        if sub is None or sub.empty:
+            messagebox.showwarning("Sin datos", "No hay datos para el ámbito seleccionado.")
+            return
+        self.status_var.set("Normalizando sexo/género...")
+        sub = self._normalizar_sexo_df(sub)
+        if mask is not None:
+            self.df.loc[mask] = sub
+        else:
+            self.df = sub
+        self._actualizar_vista()
+        self.status_var.set("Normalización de sexo/género completada.")
+
+    # ---------- Conversión de tipos ----------
     def _convertir_tipos_df(self, df):
         if 'Año' in df.columns:
             df['Año'] = pd.to_numeric(df['Año'], errors='coerce').fillna(0).astype(int)
@@ -195,6 +249,7 @@ class VentanaPreprocesamiento:
         self._actualizar_vista()
         self.status_var.set("Conversión de tipos finalizada.")
 
+    # ---------- Aplicar limpieza al ámbito ----------
     def aplicar_limpieza_ambito(self):
         if self.df is None: return
         seleccion = self.año_seleccionado.get()
@@ -214,6 +269,7 @@ class VentanaPreprocesamiento:
         antes = len(sub)
         sub.dropna(how='all', inplace=True)
         sub = self._normalizar_instituciones(sub)
+        sub = self._normalizar_sexo_df(sub)
         sub = self._convertir_tipos_df(sub)
 
         if mask is not None:
@@ -290,11 +346,9 @@ class VentanaPreprocesamiento:
         ventana_reporte.configure(bg='white')
         ventana_reporte.resizable(True, True)
 
-        # Estilo personalizado para el Treeview de inconsistencias
         style = ttk.Style()
         style.configure("Incon.Treeview", rowheight=24, borderwidth=1, relief="solid")
         style.map("Incon.Treeview", background=[('selected', '#3498db')])
-        # Queremos colores alternos, los asignaremos con tags
 
         top_frame = ttk.Frame(ventana_reporte, padding=10)
         top_frame.pack(fill=tk.X)
@@ -315,12 +369,14 @@ class VentanaPreprocesamiento:
                    command=lambda: self._marcar_todas(False)).pack(side=tk.LEFT, padx=5)
 
         self.tree_inconsistencias = ttk.Treeview(ventana_reporte,
-                                                 columns=('Seleccionar', 'columna', 'actual', 'frec_actual',
+                                                 columns=('Seleccionar', 'Invertir', 'columna', 'actual', 'frec_actual',
                                                           'canonico', 'frec_canonico'),
                                                  show='headings', selectmode='none',
                                                  style="Incon.Treeview")
         self.tree_inconsistencias.heading('Seleccionar', text='✔')
         self.tree_inconsistencias.column('Seleccionar', width=30, anchor='center')
+        self.tree_inconsistencias.heading('Invertir', text='↔')
+        self.tree_inconsistencias.column('Invertir', width=30, anchor='center')
         self.tree_inconsistencias.heading('columna', text='Columna',
                                           command=lambda: self._ordenar_por('columna'))
         self.tree_inconsistencias.column('columna', width=150)
@@ -349,14 +405,19 @@ class VentanaPreprocesamiento:
         bottom_frame.pack(fill=tk.X)
 
         def aplicar_y_cerrar():
-            seleccionados = [self.reporte_completo[i] for i, estado in enumerate(self.estados_checkboxes) if estado]
+            seleccionados = [i for i, estado in enumerate(self.estados_checkboxes) if estado]
             if not seleccionados:
                 messagebox.showinfo("Sin selección", "No ha marcado ninguna variación.")
                 return
-            for r in seleccionados:
+            for idx in seleccionados:
+                r = reporte[idx]
                 col = r['columna']
-                mask = sub_df[col] == r['valor_actual']
-                sub_df.loc[mask, col] = r['valor_canonico']
+                if self.invertir_checkboxes[idx]:
+                    mask = sub_df[col] == r['valor_canonico']
+                    sub_df.loc[mask, col] = r['valor_actual']
+                else:
+                    mask = sub_df[col] == r['valor_actual']
+                    sub_df.loc[mask, col] = r['valor_canonico']
             if self.año_seleccionado.get() != "Todos":
                 mask_orig = self.df['Año'].astype(int) == int(self.año_seleccionado.get())
                 self.df.loc[mask_orig] = sub_df
@@ -375,6 +436,7 @@ class VentanaPreprocesamiento:
 
         self.reporte_completo = reporte
         self.estados_checkboxes = [True] * len(reporte)
+        self.invertir_checkboxes = [False] * len(reporte)
         self.orden_actual = ('columna', False)
         self._refrescar_tabla_inconsistencias()
 
@@ -382,8 +444,8 @@ class VentanaPreprocesamiento:
     def _toggle_checkbox(self, event):
         region = self.tree_inconsistencias.identify_region(event.x, event.y)
         if region != 'cell': return
-        col = self.tree_inconsistencias.identify_column(event.x)
-        if col != '#1': return
+        col_id = self.tree_inconsistencias.identify_column(event.x)
+        if col_id not in ('#1', '#2'): return
         item = self.tree_inconsistencias.identify_row(event.y)
         if not item: return
         idx = self.tree_inconsistencias.index(item)
@@ -392,16 +454,18 @@ class VentanaPreprocesamiento:
             item_id = items_filtrados[idx]
             valores = self.tree_inconsistencias.item(item_id)['values']
             if valores:
-                col_actual = valores[1]
-                val_actual = valores[2]
+                col_actual = valores[2]
+                val_actual = valores[3]
                 for i, r in enumerate(self.reporte_completo):
                     if r['columna'] == col_actual and r['valor_actual'] == val_actual:
-                        self.estados_checkboxes[i] = not (valores[0] == '☑')
+                        if col_id == '#1':
+                            self.estados_checkboxes[i] = not (valores[0] == '☑')
+                        else:
+                            self.invertir_checkboxes[i] = not (valores[1] == '☑')
                         break
                 self._refrescar_tabla_inconsistencias()
 
     def _marcar_todas(self, estado):
-        """Marcar/desmarcar solo las filas visibles según el filtro de columna."""
         filtro = self.filtro_columna_var.get()
         for i, r in enumerate(self.reporte_completo):
             if filtro == "Todas" or r['columna'] == filtro:
@@ -424,22 +488,21 @@ class VentanaPreprocesamiento:
         for item in self.tree_inconsistencias.get_children():
             self.tree_inconsistencias.delete(item)
         filtro = self.filtro_columna_var.get()
-        # Colores alternos para las filas
         color_par = '#f5f5f5'
         color_impar = 'white'
         row_count = 0
         for i, r in enumerate(self.reporte_completo):
             if filtro != "Todas" and r['columna'] != filtro:
                 continue
-            marca = '☑' if self.estados_checkboxes[i] else '☐'
+            marca_sel = '☑' if self.estados_checkboxes[i] else '☐'
+            marca_inv = '☑' if self.invertir_checkboxes[i] else '☐'
             color = color_par if row_count % 2 == 0 else color_impar
-            item_id = self.tree_inconsistencias.insert('', 'end', iid=f"r{i}",
-                                                       values=(marca, r['columna'], r['valor_actual'],
-                                                               r['frecuencia_actual'], r['valor_canonico'],
-                                                               r['frecuencia_canonico']),
-                                                       tags=(color,))
+            self.tree_inconsistencias.insert('', 'end', iid=f"r{i}",
+                                             values=(marca_sel, marca_inv, r['columna'], r['valor_actual'],
+                                                     r['frecuencia_actual'], r['valor_canonico'],
+                                                     r['frecuencia_canonico']),
+                                             tags=(color,))
             row_count += 1
-        # Configurar apariencia de las etiquetas
         self.tree_inconsistencias.tag_configure(color_par, background=color_par)
         self.tree_inconsistencias.tag_configure(color_impar, background=color_impar)
 
