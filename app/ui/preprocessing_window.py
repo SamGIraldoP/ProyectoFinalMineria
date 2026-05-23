@@ -29,6 +29,18 @@ class VentanaPreprocesamiento:
         self._crear_interfaz()
         self._cargar_datos()
 
+    def _resolver_columna_anio(self):
+        if self.df is None:
+            return None
+        for col in ("Año", "AÑO", "Ano", "ANO"):
+            if col in self.df.columns:
+                return col
+        for col in self.df.columns:
+            normalizado = str(col).strip().lower().replace("ñ", "n")
+            if normalizado == "ano":
+                return col
+        return None
+
     def _crear_interfaz(self):
         toolbar = ttk.Frame(self.win, padding=10)
         toolbar.pack(fill=tk.X)
@@ -106,11 +118,12 @@ class VentanaPreprocesamiento:
             self.tree.insert('', 'end', values=list(row))
 
     def _actualizar_combobox_años(self):
-        if self.df is None or 'Año' not in self.df.columns:
+        col_anio = self._resolver_columna_anio()
+        if self.df is None or col_anio is None:
             self.cb_años['values'] = ["Todos"]
             self.año_seleccionado.set("Todos")
             return
-        años = sorted(self.df['Año'].dropna().unique())
+        años = sorted(self.df[col_anio].dropna().unique())
         años_int = []
         for a in años:
             try:
@@ -126,12 +139,16 @@ class VentanaPreprocesamiento:
         seleccion = self.año_seleccionado.get()
         if seleccion == "Todos":
             return self.df, None
+        col_anio = self._resolver_columna_anio()
+        if col_anio is None:
+            messagebox.showerror("Error", "No se encontró columna de año en el CSV.")
+            return None, None
         try:
             año = int(seleccion)
         except ValueError:
             messagebox.showerror("Error", "Año inválido.")
             return None, None
-        mask = self.df['Año'].astype(int) == año
+        mask = pd.to_numeric(self.df[col_anio], errors='coerce').fillna(0).astype(int) == año
         return self.df[mask], mask
 
     # ---------- Transformaciones ----------
@@ -304,7 +321,11 @@ class VentanaPreprocesamiento:
                 mask = sub_df[col] == r['valor_actual']
                 sub_df.loc[mask, col] = r['valor_canonico']
             if self.año_seleccionado.get() != "Todos":
-                mask_orig = self.df['Año'].astype(int) == int(self.año_seleccionado.get())
+                col_anio = self._resolver_columna_anio()
+                if col_anio is None:
+                    messagebox.showerror("Error", "No se encontró columna de año para aplicar cambios por ámbito.")
+                    return
+                mask_orig = pd.to_numeric(self.df[col_anio], errors='coerce').fillna(0).astype(int) == int(self.año_seleccionado.get())
                 self.df.loc[mask_orig] = sub_df
             else:
                 self.df = sub_df
