@@ -14,7 +14,7 @@ app/
   - main_window.py                Interfaz principal de carga y consolidación
   - preprocessing_window.py       Interfaz de preprocesamiento visual
 
-load_data.py                      Punto de entrada principal (wrapper)
+main.py                           Punto de entrada principal (wrapper)
 preprocesamiento.py               Exportador de compatibilidad (wrapper)
 data/                             Archivos CSV y metadatos
 
@@ -51,7 +51,7 @@ Requisitos:
 
 Qué hace cada módulo:
 
-- [main.py](load_data.py)
+- [main.py](main.py)
 	- Inicia la aplicación gráfica principal.
 
 - [preprocesamiento.py](preprocesamiento.py)
