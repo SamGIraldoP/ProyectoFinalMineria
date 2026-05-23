@@ -1,2 +1,10 @@
 data/
+.env
+.env.*
+!/.env.example
+*service-account*.json
+credentials*.json
+.vscode
+.csv
 __pycache__/
+*.pyc
