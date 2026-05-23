@@ -20,7 +20,7 @@ data/                             Archivos CSV y metadatos
 
 Flujo recomendado:
 
-1. Cargar archivos Excel desde [load_data.py](load_data.py).
+1. Cargar archivos Excel desde [main.py](main.py).
 2. Consolidar y guardar CSV maestro en data/.
 3. Preprocesar el CSV consolidado con una de estas opciones:
 	 - Opción interactiva: botón Preprocesar CSV (abre la ventana de edición).
@@ -51,7 +51,7 @@ Requisitos:
 
 Qué hace cada módulo:
 
-- [load_data.py](load_data.py)
+- [main.py](load_data.py)
 	- Inicia la aplicación gráfica principal.
 
 - [preprocesamiento.py](preprocesamiento.py)
