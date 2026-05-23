@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from typing import Callable, Optional
 
 import pandas as pd
 
@@ -103,10 +104,16 @@ def es_valor_nulo_texto(valor: str) -> bool:
     return limpiar_texto_para_match(valor) in VALORES_NULOS_TEXTO
 
 
+def _map_celdas(df: pd.DataFrame, func: Callable[[object], bool]) -> pd.DataFrame:
+    # Compatibilidad entre versiones de pandas evitando applymap (eliminado/deprecado en algunas versiones).
+    return df.apply(lambda col: col.map(func))
+
+
 def nulificar_celdas_vacias_df(df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     copia = df.copy()
-    mask_vacia = copia.applymap(lambda v: isinstance(v, str) and not v.strip())
-    mask_sin_info = (~mask_vacia) & copia.applymap(
+    mask_vacia = _map_celdas(copia, lambda v: isinstance(v, str) and not v.strip())
+    mask_sin_info = (~mask_vacia) & _map_celdas(
+        copia,
         lambda v: isinstance(v, str) and es_valor_nulo_texto(v)
     )
     n_vacias = int(mask_vacia.sum().sum())
@@ -171,7 +178,7 @@ def limpiar_df_base(df: pd.DataFrame) -> pd.DataFrame:
     return copia
 
 
-def preprocesar_csv_maestro(path_csv: str, output_path: str = None) -> pd.DataFrame:
+def preprocesar_csv_maestro(path_csv: str, output_path: Optional[str] = None) -> pd.DataFrame:
     df = cargar_csv(path_csv)
     df_limpio = limpiar_df_base(df)
     guardar_csv(df_limpio, output_path or path_csv)
