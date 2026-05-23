@@ -903,7 +903,7 @@ class SNIESConsolidador:
                             "Solo conserva las columnas maestras definidas.\n"
                             "Carga eficiente con metadatos.\n"
                             "Panel de resumen de datos.\n"
-                            "Emparejamiento forzado de Sexo/Género (ignora IDs).\n"
+                            "Emparejamiento forzado de Sexo-Género (ignora IDs).\n"
                             "Detección interactiva de año.\n"
                             "Limpieza automática de filas de notas.\n"
                             "Eliminación de sufijos '.0' en valores enteros.\n\n"
