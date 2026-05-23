@@ -14,6 +14,7 @@ FOLDER_TO_TIPO = {
     "Estudiantes_inscritos": "Estudiantes inscritos",
     "Estudiantes_matriculados": "Estudiantes matriculados",
     "Estudiantes_matriculados_en_primer_curso": "Estudiantes matriculados en primer curso",
+    "Estudiantes_matriculados_primer_curso": "Estudiantes matriculados en primer curso",
     "Estudiantes_graduados": "Estudiantes graduados",
     "Docentes": "Docentes",
     "Administrativos": "Administrativos",
@@ -74,10 +75,19 @@ def _export_google_sheet(service, file_id: str, destination_path: str, progress_
                     last_pct = pct
 
 
+def _usar_archivo_local_existente(destination_path: str, progress_cb: Optional[Callable[[str], None]] = None) -> bool:
+    if not os.path.exists(destination_path):
+        return False
+    if progress_cb:
+        progress_cb(f"Archivo ya descargado, se reutiliza: {os.path.basename(destination_path)}")
+    return True
+
+
 def descargar_datasets_desde_drive(
     folder_id: str,
     credentials_path: str,
     work_dir: str,
+    sobrescribir_existentes: bool = False,
     progress_cb: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, List[str]]:
     """Descarga archivos por tipo desde la carpeta datos_snies de Drive.
@@ -118,6 +128,14 @@ def descargar_datasets_desde_drive(
             if mime == "application/vnd.google-apps.spreadsheet":
                 file_name = f"{original_name}.xlsx"
                 dest = os.path.join(tipo_dir, file_name)
+                if sobrescribir_existentes and os.path.exists(dest):
+                    if progress_cb:
+                        progress_cb(f"Sobrescribiendo archivo existente: {os.path.basename(dest)}")
+                elif _usar_archivo_local_existente(dest, progress_cb=progress_cb):
+                    result[tipo].append(dest)
+                    if progress_cb:
+                        progress_cb(f"Archivo listo: {dest}")
+                    continue
                 if progress_cb:
                     progress_cb(f"Exportando hoja {original_name} de {folder_name}...")
                 _export_google_sheet(service, drive_file["id"], dest, progress_cb=progress_cb)
@@ -134,6 +152,14 @@ def descargar_datasets_desde_drive(
                 continue
 
             dest = os.path.join(tipo_dir, original_name)
+            if sobrescribir_existentes and os.path.exists(dest):
+                if progress_cb:
+                    progress_cb(f"Sobrescribiendo archivo existente: {os.path.basename(dest)}")
+            elif _usar_archivo_local_existente(dest, progress_cb=progress_cb):
+                result[tipo].append(dest)
+                if progress_cb:
+                    progress_cb(f"Archivo listo: {dest}")
+                continue
             if progress_cb:
                 progress_cb(f"Descargando archivo {original_name} de {folder_name}...")
             _download_drive_file(service, drive_file["id"], dest, progress_cb=progress_cb)
