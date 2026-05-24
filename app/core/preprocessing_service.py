@@ -15,8 +15,14 @@ NUMERIC_COLUMNS = [
     "ADMITIDOS",
     "GRADUADOS",
     "INSCRITOS",
-    "Matriculados 2017",
+    "Matriculados",
     "No. de Docentes",
+    "No de Docentes",
+    "Nro. de docentes",
+    "Nro de Docentes",
+    "N° de Docentes",
+    "N° de docentes",
+    "Nro. De DOCENTES",
     "PRIMER CURSO",
 ]
 
