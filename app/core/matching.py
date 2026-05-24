@@ -1,12 +1,52 @@
 import re
 import unicodedata
 
+from app.core.year_utils import (
+    quitar_acentos,
+    normalizar_para_match,
+    levenshtein_ratio,
+    similitud_combinada,
+)
+
 UMBRAL = 0.6
 
-
-def quitar_acentos(texto: str) -> str:
-    nfkd = unicodedata.normalize("NFKD", texto)
-    return "".join([c for c in nfkd if not unicodedata.combining(c)])
+# Grupos de alias entre columnas que representan el mismo campo semántico.
+_ALIAS_COLUMNAS = [
+    {
+        "principal o seccional",
+        "tipo ies",
+        "tipo de ies",
+    },
+    {
+        "admitidos",
+        "admisiones",
+        "admision",
+    },
+    {
+        "inscritos",
+        "inscripciones",
+        "inscripcion",
+        "inscrito",
+    },
+    {
+        "matriculados",
+        "matriculados 2017",
+    },
+    {
+        "no. de docentes",
+        "no de docentes",
+        "nro. de docentes",
+        "nro de docentes",
+        "n° de docentes",
+        "nro. docentes",
+        "docentes",
+        "docente",
+    },
+    {
+        "matriculados",
+        "matriculados 2017",
+    },
+]
 
 
 def limpiar_nombre_columna(nombre: str) -> str:
@@ -16,65 +56,74 @@ def limpiar_nombre_columna(nombre: str) -> str:
     return n
 
 
-def normalizar_para_match(nombre: str) -> str:
-    nombre = nombre.lower()
-    nombre = quitar_acentos(nombre)
-    nombre = re.sub(r"[^a-z0-9\s]", "", nombre)
-    nombre = re.sub(r"\s+", " ", nombre).strip()
-    return nombre
-
-
 def limpiar_texto_para_match(texto: str) -> str:
-    texto = texto.lower()
-    texto = quitar_acentos(texto)
-    texto = re.sub(r"[^a-z0-9\s]", "", texto)
-    texto = re.sub(r"\s+", " ", texto).strip()
-    return texto
+    return normalizar_para_match(texto)
 
 
-def levenshtein_ratio(s1: str, s2: str) -> float:
-    if not s1 and not s2:
-        return 1.0
-    if not s1 or not s2:
-        return 0.0
-    m, n = len(s1), len(s2)
-    d = [[0] * (n + 1) for _ in range(m + 1)]
-    for i in range(m + 1):
-        d[i][0] = i
-    for j in range(n + 1):
-        d[0][j] = j
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            cost = 0 if s1[i - 1] == s2[j - 1] else 1
-            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost)
-    return 1 - d[m][n] / max(m, n)
+def _es_sexo_genero(cadena1: str, cadena2: str) -> bool:
+    palabras = ['sexo', 'genero', 'género', 'sex', 'gender']
+    c1 = normalizar_para_match(cadena1)
+    c2 = normalizar_para_match(cadena2)
+    if c1.startswith("id") or c2.startswith("id"):
+        return False
+    return any(p in c1 for p in palabras) and any(p in c2 for p in palabras)
 
 
-def similitud_combinada(cadena1: str, cadena2: str) -> float:
-    s1 = normalizar_para_match(cadena1)
-    s2 = normalizar_para_match(cadena2)
-    lev = levenshtein_ratio(s1, s2)
-    tokens1 = set(s1.split())
-    tokens2 = set(s2.split())
-    if not tokens1 and not tokens2:
-        jaccard = 1.0
-    elif not tokens1 or not tokens2:
-        jaccard = 0.0
-    else:
-        jaccard = len(tokens1 & tokens2) / len(tokens1 | tokens2)
-    return max(lev, jaccard)
+def _es_alias_columna(cadena1: str, cadena2: str) -> bool:
+    c1 = normalizar_para_match(cadena1)
+    c2 = normalizar_para_match(cadena2)
+
+    # Caso frecuente: columnas con sufijo de año, p. ej. "Admisiones 2018".
+    if (("admitid" in c1) and ("admision" in c2)) or (("admitid" in c2) and ("admision" in c1)):
+        return True
+    # Análogo para inscritos/inscripciones
+    if (("inscrit" in c1) and ("inscrip" in c2)) or (("inscrit" in c2) and ("inscrip" in c1)):
+        return True
+    if ("matriculad" in c1) and ("matriculad" in c2):
+        return True
+
+    for grupo in _ALIAS_COLUMNAS:
+        if c1 in grupo and c2 in grupo:
+            return True
+    return False
+
+
+def limpiar_flotante(s: str) -> str:
+    if isinstance(s, str) and re.match(r'^-?\d+\.0$', s):
+        return s[:-2]
+    return s
+
+
+
+
+ 
 
 
 def mapear_columnas_expandible(canonicas, nuevas_raw, umbral=UMBRAL):
     nuevas_limpias = [limpiar_nombre_columna(c) for c in nuevas_raw]
     canonicas_limpias = [limpiar_nombre_columna(c) for c in canonicas]
+
     parejas = []
     for i, cn in enumerate(canonicas_limpias):
         for j, nn in enumerate(nuevas_limpias):
-            sim = similitud_combinada(cn, nn)
+            cn_norm = normalizar_para_match(cn)
+            nn_norm = normalizar_para_match(nn)
+
+            if cn_norm == nn_norm:
+                sim = 1.0
+            elif _es_sexo_genero(cn, nn):
+                sim = 0.98
+            elif _es_alias_columna(cn, nn):
+                # Alias de alta prioridad, pero por debajo de coincidencia exacta.
+                sim = 0.97
+            else:
+                sim = similitud_combinada(cn, nn)
+            if re.search(r'\bid\b', nn):
+                sim *= 0.8
             if sim >= umbral:
                 parejas.append((sim, i, j))
     parejas.sort(key=lambda x: x[0], reverse=True)
+
     canonicas_asignadas = set()
     nuevas_asignadas = set()
     mapeo = {i: None for i in range(len(canonicas))}
@@ -83,4 +132,5 @@ def mapear_columnas_expandible(canonicas, nuevas_raw, umbral=UMBRAL):
             mapeo[i] = j
             canonicas_asignadas.add(i)
             nuevas_asignadas.add(j)
+
     return mapeo
