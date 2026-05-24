@@ -1,6 +1,7 @@
 import os
 import tkinter as tk
 from tkinter import messagebox, ttk
+import pandas as pd
 
 from app.core.preprocessing_service import (
     cargar_csv,
@@ -9,6 +10,7 @@ from app.core.preprocessing_service import (
     guardar_csv,
     limpiar_df_base,
 )
+from app.core.year_utils import get_año_col_name
 
 
 class VentanaPreprocesamiento:
@@ -32,14 +34,8 @@ class VentanaPreprocesamiento:
     def _resolver_columna_anio(self):
         if self.df is None:
             return None
-        for col in ("Año", "AÑO", "Ano", "ANO"):
-            if col in self.df.columns:
-                return col
-        for col in self.df.columns:
-            normalizado = str(col).strip().lower().replace("ñ", "n")
-            if normalizado == "ano":
-                return col
-        return None
+        # Delegar a la utilidad centralizada
+        return get_año_col_name(self.df)
 
     def _crear_interfaz(self):
         toolbar = ttk.Frame(self.win, padding=10)

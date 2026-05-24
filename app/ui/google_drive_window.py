@@ -247,20 +247,43 @@ class VentanaGoogleDriveImport:
             return
 
         procesados = 0
+        fallidos = []
         for iid in seleccion:
             reg = self.path_map.get(iid)
             if not reg:
                 continue
             self.app.tipo_seleccionado.set(reg["tipo"])
-            self.app.procesar_un_archivo(
+            ok = self.app.procesar_un_archivo(
                 reg["ruta"],
                 tipo_forzado=reg["tipo"],
                 confirmar_encabezados=False,
                 reemplazar_duplicados=True,
             )
-            procesados += 1
+            if ok:
+                procesados += 1
+            else:
+                fallidos.append(reg["ruta"])
             self.app.root.update_idletasks()
 
         self.app.actualizar_info()
-        self._log(f"Integración finalizada. Archivos procesados: {procesados}")
-        messagebox.showinfo("Google Drive", f"Se integraron {procesados} archivo(s) al CSV master.", parent=self.win)
+        self._log(
+            f"Integración finalizada. Integrados: {procesados} | Fallidos: {len(fallidos)}"
+        )
+        if fallidos:
+            detalle = "\n".join(f"- {os.path.basename(r)}" for r in fallidos[:20])
+            if len(fallidos) > 20:
+                detalle += "\n- ..."
+            messagebox.showwarning(
+                "Google Drive",
+                (
+                    f"Se integraron {procesados} archivo(s) y fallaron {len(fallidos)}.\n\n"
+                    f"Archivos con fallo:\n{detalle}"
+                ),
+                parent=self.win,
+            )
+        else:
+            messagebox.showinfo(
+                "Google Drive",
+                f"Se integraron {procesados} archivo(s) al CSV master.",
+                parent=self.win,
+            )

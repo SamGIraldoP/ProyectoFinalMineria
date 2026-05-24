@@ -4,7 +4,14 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 from app.config.paths import DATA_DIR
-from app.core.matching import limpiar_nombre_columna, mapear_columnas_expandible, normalizar_para_match, similitud_combinada
+from app.core.matching import limpiar_nombre_columna, mapear_columnas_expandible
+from app.core.year_utils import (
+    get_año_col_name,
+    extraer_año_desde_dataframe,
+    pedir_año_manual,
+    asignar_año_a_dataframe,
+    extraer_año_desde_archivo,
+)
 from app.core.mysql_snies_setup import crear_base_y_tablas, insertar_datos_csv
 from app.core.preprocessing_service import preprocesar_csv_maestro
 from app.ui.preprocessing_window import VentanaPreprocesamiento
@@ -96,7 +103,7 @@ class SNIESConsolidador:
             "Área de Conocimiento", "Núcleo Básico del Conocimiento (NBC)",
             "Código del Departamento (Programa)", "Departamento de oferta del programa",
             "Código del Municipio (Programa)", "Municipio de oferta del programa",
-            "Sexo", "Año", "Semestre", "Matriculados 2017"
+                "Sexo", "Año", "Semestre", "Matriculados"
         ],
         "Estudiantes matriculados en primer curso": [
             "CÓDIGO DE LA INSTITUCIÓN", "IES_PADRE", "INSTITUCIÓN DE EDUCACIÓN SUPERIOR (IES)",
@@ -374,14 +381,46 @@ class SNIESConsolidador:
             messagebox.showerror("Error", f"No se pudieron cargar los datos de {tipo}:\n{e}")
 
     def _resolver_columna_anio(self, df: pd.DataFrame):
-        candidatos_directos = ["Año", "AÑO", "Ano", "ANO"]
-        for col in candidatos_directos:
-            if col in df.columns:
-                return col
+        # Intentar varias estrategias para resolver la columna de año:
+        # 1. Coincidencia exacta del nombre de columna (p. ej. 'Año')
+        col = get_año_col_name(df)
+        if col:
+            return col
 
-        for col in df.columns:
-            if normalizar_para_match(col) == "ano":
-                return col
+        # 2. Buscar la mejor columna por similitud (ej. 'AÑO', 'Ano', 'Año de reporte')
+        try:
+            from app.core.year_utils import buscar_mejor_columna_año, extraer_años_desde_dataframe_scan
+
+            mejor_col, mejor_sim = buscar_mejor_columna_año(list(df.columns))
+            if mejor_col and mejor_sim >= 0.7:
+                return mejor_col
+
+            # 3. Escanear encabezados/primeras celdas en busca de años y mapearlos a una columna
+            años_en_texto = extraer_años_desde_dataframe_scan(df)
+            if años_en_texto:
+                objetivo = años_en_texto[0]
+                # intentar localizar una columna que contenga ese año como valores
+                for c in df.columns:
+                    try:
+                        vals = df[c].dropna().astype(str)
+                        # revisar solo unas pocas muestras para eficiencia
+                        sample = vals.head(200).unique()
+                        for v in sample:
+                            if v is None:
+                                continue
+                            txt = str(v).strip()
+                            if not txt:
+                                continue
+                            if txt.isdigit() and int(txt) == objetivo:
+                                return c
+                            # también comparar patrones dentro del texto
+                            if str(objetivo) in txt:
+                                return c
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
         return None
 
     # ---------- Carga inicial (solo metadatos) ----------
@@ -518,44 +557,47 @@ class SNIESConsolidador:
         self.status_var.set(f"Analizando: {nombre}")
         self.progress_var.set(10)
         self.root.update()
-        fila_inicio = self._detectar_fila_encabezado(archivo)
+        hoja_datos = self._detectar_hoja_datos(archivo)
+        fila_inicio = self._detectar_fila_encabezado(archivo, sheet_name=hoja_datos)
 
         try:
-            df_a2 = pd.read_excel(archivo, sheet_name=0, header=None, nrows=2)
+            df_a2 = self._leer_tabular(archivo, header=None, nrows=2, sheet_name=hoja_datos)
             titulo = str(df_a2.iloc[1, 0]) if df_a2.shape[0] > 1 else ""
         except:
             titulo = ""
 
         try:
-            df_muestra = pd.read_excel(archivo, sheet_name=0, header=fila_inicio, nrows=100)
+            df_muestra = self._leer_tabular(archivo, header=fila_inicio, nrows=100, sheet_name=hoja_datos)
             if df_muestra.empty:
                 messagebox.showwarning("Archivo vacío", f"{nombre}: no se encontraron datos.")
-                return
+                return False
             columnas_detectadas = [limpiar_nombre_columna(c) for c in df_muestra.columns]
             año = self._extraer_año_desde_df(df_muestra)
+            if año is None:
+                año = extraer_año_desde_archivo(archivo, sheet_name=hoja_datos)
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
             print(f"[Procesamiento] Error leyendo {nombre}: {e}")
-            return
+            return False
 
         if confirmar_encabezados:
             if not self._confirmar_encabezados(columnas_detectadas, archivo, año, titulo):
                 self.status_var.set(f"Cancelado: {nombre}")
                 self.progress_var.set(0)
-                return
+                return False
 
         self.progress_var.set(30)
         self.status_var.set(f"Procesando: {nombre}")
         self.root.update()
 
         try:
-            df = pd.read_excel(archivo, sheet_name=0, header=fila_inicio)
+            df = self._leer_tabular(archivo, header=fila_inicio, sheet_name=hoja_datos)
             df.dropna(how="all", axis=1, inplace=True)
             df.dropna(how="all", axis=0, inplace=True)
             if df.empty:
                 messagebox.showwarning("Sin datos", f"{nombre}: no hay datos después de la limpieza.")
                 print(f"[Procesamiento] Sin datos despues de limpieza: {nombre}")
-                return
+                return False
 
             # Cargar datos completos del tipo si aún no están en memoria
             self._cargar_datos_completos(tipo)
@@ -583,10 +625,18 @@ class SNIESConsolidador:
 
             año = self._extraer_año_desde_df(df_consolidado)
             if año is None:
-                messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
-                print(f"[Procesamiento] No se pudo detectar año: {nombre}")
-                return
-            df_consolidado["Año"] = año
+                año = extraer_año_desde_archivo(archivo, sheet_name=hoja_datos)
+            if año is None:
+                # Solo pedir manual cuando se agotaron todas las detecciones automáticas.
+                año = self._pedir_año_manual_desde_ui()
+                if año is None:
+                    messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
+                    print(f"[Procesamiento] No se pudo detectar año: {nombre}")
+                    return False
+            # Intentar asignar usando la utilidad; si no hay columna canónica de año, crearla como fallback
+            ok_asign = asignar_año_a_dataframe(df_consolidado, año)
+            if not ok_asign:
+                df_consolidado["Año"] = año
 
             # Verificar duplicado de año
             if tipo in self.data:
@@ -596,7 +646,7 @@ class SNIESConsolidador:
                         if not messagebox.askyesno("Año duplicado",
                                                    f"Ya existen datos para el año {año} en '{tipo}'.\n¿Desea reemplazarlos?"):
                             self.status_var.set(f"Omitido: {nombre} (año {año} ya existe)")
-                            return
+                            return False
 
             nuevas_filas = df_consolidado.values.tolist()
             n_cols = len(canonicas)
@@ -615,6 +665,7 @@ class SNIESConsolidador:
             ds_existente = next((ds for ds in datasets if ds["año"] == año), None)
             if ds_existente:
                 ds_existente["archivo"] = archivo
+                ds_existente["hoja"] = hoja_datos
                 ds_existente["fila_inicio"] = fila_inicio
                 ds_existente["filas"] = nuevas_filas
                 # Quitar el campo registros si existe para que use filas reales
@@ -622,6 +673,7 @@ class SNIESConsolidador:
             else:
                 datasets.append({
                     "archivo": archivo,
+                    "hoja": hoja_datos,
                     "año": año,
                     "fila_inicio": fila_inicio,
                     "filas": nuevas_filas
@@ -632,10 +684,12 @@ class SNIESConsolidador:
             self.status_var.set(f"✔ {nombre} cargado (Año {año})")
             self.actualizar_info()
             print(f"[Procesamiento] Archivo integrado: {nombre} | año={año} | tipo={tipo}")
+            return True
 
         except Exception as e:
             messagebox.showerror("Error", f"Error al procesar {nombre}:\n{e}")
             print(f"[Procesamiento] Error procesando {nombre}: {e}")
+            return False
 
     # ---------- Eliminar dataset ----------
     def previsualizar_dataset(self, tipo, año):
@@ -799,9 +853,9 @@ class SNIESConsolidador:
             return self.data[tipo]["headers"]
         return None
 
-    def _detectar_fila_encabezado(self, archivo):
+    def _detectar_fila_encabezado(self, archivo, sheet_name: int | str = 0):
         try:
-            df_raw = pd.read_excel(archivo, sheet_name=0, header=None, nrows=20)
+            df_raw = self._leer_tabular(archivo, header=None, nrows=20, sheet_name=sheet_name)
             best_row = 0
             best_score = -1
             for i, (_, row) in enumerate(df_raw.iterrows()):
@@ -818,29 +872,75 @@ class SNIESConsolidador:
         except Exception:
             return 0
 
-    def _extraer_año_desde_df(self, df):
-        objetivos = ["año", "ano"]
-        mejor_col = None
-        mejor_sim = 0.0
-        for col in df.columns:
-            col_norm = normalizar_para_match(col)
-            for obj in objetivos:
-                sim = similitud_combinada(col_norm, obj)
-                if sim > mejor_sim:
-                    mejor_sim = sim
-                    mejor_col = col
-        if mejor_sim < 0.7:
-            return None
-        valores = df[mejor_col].dropna().unique()
-        if len(valores) == 1:
+    def _detectar_hoja_datos(self, archivo):
+        """Para Excel, selecciona la hoja con mayor probabilidad de contener la tabla de datos."""
+        ext = os.path.splitext(archivo)[1].lower()
+        if ext not in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
+            return 0
+        try:
+            xls = pd.ExcelFile(archivo)
+            mejor_hoja = 0
+            mejor_puntaje = -1
+            for i, hoja in enumerate(xls.sheet_names):
+                try:
+                    df_raw = pd.read_excel(archivo, sheet_name=hoja, header=None, nrows=30)
+                except Exception:
+                    continue
+                if df_raw is None or df_raw.empty:
+                    continue
+
+                # Puntaje simple: más celdas no vacías + presencia de columna de año + años en texto.
+                no_vacias = int(df_raw.notna().sum().sum())
+                try:
+                    df_guess = pd.read_excel(archivo, sheet_name=hoja, header=0, nrows=120)
+                    año_guess = self._extraer_año_desde_df(df_guess)
+                    bonus_año = 50 if año_guess is not None else 0
+                except Exception:
+                    bonus_año = 0
+                puntaje = no_vacias + bonus_año
+                if puntaje > mejor_puntaje:
+                    mejor_puntaje = puntaje
+                    mejor_hoja = hoja
+            return mejor_hoja
+        except Exception:
+            return 0
+
+    def _leer_tabular(self, archivo, header: int | None = 0, nrows=None, sheet_name: int | str = 0):
+        """Lee Excel/CSV devolviendo DataFrame para unificar flujo local y Google Drive."""
+        ext = os.path.splitext(archivo)[1].lower()
+        if ext in {".csv", ".txt"}:
             try:
-                return int(float(valores[0]))
-            except:
-                return None
-        elif len(valores) > 1:
-            messagebox.showwarning("Año múltiple", f"Se encontraron varios años: {valores}. Se usará el primero.")
-            return int(float(valores[0]))
-        return None
+                return pd.read_csv(
+                    archivo,
+                    header=header,
+                    nrows=nrows,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding="utf-8-sig",
+                )
+            except Exception:
+                return pd.read_csv(
+                    archivo,
+                    header=header,
+                    nrows=nrows,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding="latin1",
+                )
+
+        return pd.read_excel(
+            archivo,
+            sheet_name=sheet_name,
+            header=header,
+            nrows=nrows,
+        )
+
+    def _extraer_año_desde_df(self, df):
+        # En el flujo de carga automática no se debe abrir diálogo manual aquí.
+        return extraer_año_desde_dataframe(df, root=self.root, pedir_manual_si_falla=False)
+
+    def _pedir_año_manual_desde_ui(self):
+        return pedir_año_manual()
 
     def _confirmar_encabezados(self, columnas, archivo, año, titulo):
         win = tk.Toplevel(self.root)
