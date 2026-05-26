@@ -4,6 +4,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Callable
 import os
+import re
 
 import pandas as pd
 
@@ -257,6 +258,22 @@ def _clean_value(value: object) -> str | None:
     return text or None
 
 
+_NUMERIC_FLOAT_CODE_PATTERN = re.compile(r"^\d+\.0+$")
+
+
+def _normalize_numeric_code(value: object, allow_zero: bool = False) -> str | None:
+    code = _text(value)
+    if not code:
+        return None
+    if _NUMERIC_FLOAT_CODE_PATTERN.fullmatch(code):
+        code = code.split(".", 1)[0]
+    if not code.isdigit():
+        return None
+    if not allow_zero and code.strip("0") == "":
+        return None
+    return code
+
+
 def _ensure_database(cursor, log: Callable[[str], None]) -> None:
     cursor.execute(
         "SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s",
@@ -267,6 +284,20 @@ def _ensure_database(cursor, log: Callable[[str], None]) -> None:
         f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
     )
     log(f"Base de datos '{DB_NAME}' {'ya existía' if existed else 'creada'}.")
+
+
+def _recreate_database(cursor, log: Callable[[str], None]) -> None:
+    cursor.execute(
+        "SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s",
+        (DB_NAME,),
+    )
+    existed = cursor.fetchone() is not None
+    cursor.execute(f"DROP DATABASE IF EXISTS `{DB_NAME}`")
+    log(f"Base de datos '{DB_NAME}' {'eliminada' if existed else 'no existía'} para reconstrucción.")
+    cursor.execute(
+        f"CREATE DATABASE `{DB_NAME}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+    )
+    log(f"Base de datos '{DB_NAME}' creada desde cero.")
 
 
 def _table_exists(cursor, table_name: str) -> bool:
@@ -585,7 +616,7 @@ def _build_departamentos(*dfs: pd.DataFrame | None) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=["codigo", "nombre"])
     data = pd.concat(frames, ignore_index=True)
-    data["codigo"] = data["codigo"].map(_clean_value)
+    data["codigo"] = data["codigo"].map(_normalize_numeric_code)
     data["nombre"] = data["nombre"].map(_clean_value)
     data = data.dropna(subset=["codigo"])
     data = data[data["codigo"] != ""]
@@ -604,8 +635,9 @@ def _build_municipios(*dfs: pd.DataFrame | None) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame(columns=["codigo", "nombre", "departamento_codigo"])
     data = pd.concat(frames, ignore_index=True)
-    for column in ["codigo", "nombre", "departamento_codigo"]:
-        data[column] = data[column].map(_clean_value)
+    data["codigo"] = data["codigo"].map(_normalize_numeric_code)
+    data["nombre"] = data["nombre"].map(_clean_value)
+    data["departamento_codigo"] = data["departamento_codigo"].map(_normalize_numeric_code)
     data = data.dropna(subset=["codigo"])
     data = data[data["codigo"] != ""]
     data = data.groupby("codigo", as_index=False).agg({"nombre": _first_non_empty, "departamento_codigo": _first_non_empty})
@@ -657,6 +689,9 @@ def _build_instituciones(*dfs: pd.DataFrame | None) -> pd.DataFrame:
     data = pd.concat(frames, ignore_index=True)
     for column in data.columns:
         data[column] = data[column].map(_clean_value)
+    data["codigo"] = data["codigo"].map(_normalize_numeric_code)
+    data["municipio_codigo"] = data["municipio_codigo"].map(_normalize_numeric_code)
+    data["ies_padre_codigo"] = data["ies_padre_codigo"].map(_normalize_numeric_code)
     data = data.dropna(subset=["codigo"])
     data = data[data["codigo"] != ""]
     data["ies_padre_codigo"] = data.apply(
@@ -708,6 +743,7 @@ def _build_programas(*dfs: pd.DataFrame | None) -> pd.DataFrame:
     data = pd.concat(frames, ignore_index=True)
     for column in data.columns:
         data[column] = data[column].map(_clean_value)
+    data["codigo_snies"] = data["codigo_snies"].map(_normalize_numeric_code)
     data = data.dropna(subset=["codigo_snies"])
     data = data[data["codigo_snies"] != ""]
     data = data.groupby("codigo_snies", as_index=False).agg(
@@ -733,13 +769,14 @@ def _build_text_dimension(column_name: str, *dfs: pd.DataFrame | None) -> pd.Dat
             continue
         frames.append(df[[column_name]].copy())
     if not frames:
-        return pd.DataFrame(columns=[column_name])
+        return pd.DataFrame(columns=["nombre"])
     data = pd.concat(frames, ignore_index=True)
     data[column_name] = data[column_name].map(_clean_value)
     data = data.dropna(subset=[column_name])
     data = data[data[column_name] != ""]
     data = data.drop_duplicates(subset=[column_name]).reset_index(drop=True)
-    return data
+    data = data.rename(columns={column_name: "nombre"})
+    return data[["nombre"]]
 
 
 def _build_sexo_dimension(*dfs: pd.DataFrame | None) -> pd.DataFrame:
@@ -795,7 +832,7 @@ def _build_fact_admin(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["institucion_codigo", "anio", "semestre", "auxiliar", "tecnico", "profesional", "directivo", "total"])
     data = df[["institucion_codigo", "anio", "semestre", "auxiliar", "tecnico", "profesional", "directivo", "total"]].copy()
-    data["institucion_codigo"] = data["institucion_codigo"].map(_clean_value)
+    data["institucion_codigo"] = data["institucion_codigo"].map(_normalize_numeric_code)
     for column in ["anio", "semestre", "auxiliar", "tecnico", "profesional", "directivo", "total"]:
         data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0).astype(int)
     data = data.dropna(subset=["institucion_codigo"])
@@ -807,7 +844,8 @@ def _build_fact_docentes(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["institucion_codigo", "sexo", "nivel_formacion_docente", "tiempo_dedicacion", "tipo_contrato", "anio", "semestre", "num_docentes"])
     data = df[["institucion_codigo", "sexo", "nivel_formacion_docente", "tiempo_dedicacion", "tipo_contrato", "anio", "semestre", "num_docentes"]].copy()
-    for column in ["institucion_codigo", "sexo", "nivel_formacion_docente", "tiempo_dedicacion", "tipo_contrato"]:
+    data["institucion_codigo"] = data["institucion_codigo"].map(_normalize_numeric_code)
+    for column in ["sexo", "nivel_formacion_docente", "tiempo_dedicacion", "tipo_contrato"]:
         data[column] = data[column].map(_clean_value)
     for column in ["anio", "semestre", "num_docentes"]:
         data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0).astype(int)
@@ -816,6 +854,7 @@ def _build_fact_docentes(df: pd.DataFrame | None) -> pd.DataFrame:
     return data.groupby(
         ["institucion_codigo", "sexo", "nivel_formacion_docente", "tiempo_dedicacion", "tipo_contrato", "anio", "semestre"],
         as_index=False,
+        dropna=False,
     )[["num_docentes"]].sum().reset_index(drop=True)
 
 
@@ -827,15 +866,15 @@ def _build_fact_estudiantes(estudiantes: dict[str, pd.DataFrame | None]) -> pd.D
         if df is None or df.empty:
             continue
         data = df[key_columns + [measure_name]].copy()
-        data["institucion_codigo"] = data["institucion_codigo"].map(_clean_value)
-        data["programa_codigo"] = data["programa_codigo"].map(_clean_value)
-        data["municipio_programa_codigo"] = data["municipio_programa_codigo"].map(_clean_value)
+        data["institucion_codigo"] = data["institucion_codigo"].map(_normalize_numeric_code)
+        data["programa_codigo"] = data["programa_codigo"].map(_normalize_numeric_code)
+        data["municipio_programa_codigo"] = data["municipio_programa_codigo"].map(_normalize_numeric_code)
         data["sexo"] = data["sexo"].map(_clean_value)
         for column in ["anio", "semestre", measure_name]:
             data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0).astype(int)
         data = data.dropna(subset=["institucion_codigo", "programa_codigo"])
         data = data[(data["institucion_codigo"] != "") & (data["programa_codigo"] != "")]
-        data = data.groupby(key_columns, as_index=False)[measure_name].sum()
+        data = data.groupby(key_columns, as_index=False, dropna=False)[measure_name].sum()
         measure_frames.append(data)
     if not measure_frames:
         return pd.DataFrame(columns=key_columns + ["admitidos", "inscritos", "matriculados", "graduados"])
@@ -873,6 +912,115 @@ def _map_fk_cine_detallado(df: pd.DataFrame, broad_map: dict[object, int], speci
         return detail_map.get((_normalize_key(row["cine_detallado"]), specific_id))
 
     return df.apply(_resolve, axis=1)
+
+
+def _drop_rows_with_missing_fk(
+    df: pd.DataFrame,
+    column: str,
+    valid_values: set[str],
+    table_name: str,
+    log: Callable[[str], None],
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    before = len(df)
+    filtered = df[df[column].isin(valid_values)].reset_index(drop=True)
+    dropped = before - len(filtered)
+    if dropped > 0:
+        log(f"Tabla '{table_name}': {dropped} fila(s) descartada(s) por FK inválida en '{column}'.")
+    return filtered
+
+
+def _nullify_invalid_fk_values(
+    df: pd.DataFrame,
+    column: str,
+    valid_values: set[str],
+    table_name: str,
+    log: Callable[[str], None],
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    updated = df.copy()
+    invalid_mask = updated[column].notna() & (~updated[column].isin(valid_values))
+    invalid_count = int(invalid_mask.sum())
+    if invalid_count > 0:
+        updated.loc[invalid_mask, column] = None
+        log(f"Tabla '{table_name}': {invalid_count} fila(s) con '{column}' inválido se ajustaron a NULL.")
+    return updated
+
+
+def _fetch_existing_values(cursor, table_name: str, column_name: str) -> set[str]:
+    cursor.execute(f"SELECT `{column_name}` FROM `{table_name}`")
+    values: set[str] = set()
+    for row in cursor.fetchall():
+        if not row:
+            continue
+        value = row[0]
+        if value is None:
+            continue
+        cleaned = str(value).strip()
+        if cleaned:
+            values.add(cleaned)
+    return values
+
+
+def _insert_instituciones_dimension(
+    cursor,
+    instituciones: pd.DataFrame,
+    municipio_codes: set[str],
+    log: Callable[[str], None],
+) -> set[str]:
+    if instituciones is None or instituciones.empty:
+        _insert_dataframe(
+            cursor,
+            "INSTITUCION",
+            ["codigo", "nombre", "sector", "caracter", "tipo", "municipio_codigo", "ies_padre_codigo"],
+            instituciones,
+            log,
+        )
+        return set()
+
+    working = _nullify_invalid_fk_values(instituciones, "municipio_codigo", municipio_codes, "INSTITUCION", log)
+
+    parent_links = working[["codigo", "ies_padre_codigo"]].copy()
+    parent_links = parent_links.dropna(subset=["ies_padre_codigo"])
+    parent_links = parent_links[parent_links["ies_padre_codigo"] != ""]
+
+    # Inserta primero sin relación padre para evitar fallos de orden en FK autorreferencial.
+    insert_df = working.copy()
+    insert_df["ies_padre_codigo"] = None
+    _insert_dataframe(
+        cursor,
+        "INSTITUCION",
+        ["codigo", "nombre", "sector", "caracter", "tipo", "municipio_codigo", "ies_padre_codigo"],
+        insert_df,
+        log,
+    )
+
+    institucion_codes = _fetch_existing_values(cursor, "INSTITUCION", "codigo")
+
+    if parent_links.empty:
+        return institucion_codes
+
+    parent_links["codigo"] = parent_links["codigo"].astype(str)
+    parent_links["ies_padre_codigo"] = parent_links["ies_padre_codigo"].astype(str)
+
+    total_links = len(parent_links)
+    parent_links = parent_links[
+        parent_links["codigo"].isin(institucion_codes)
+        & parent_links["ies_padre_codigo"].isin(institucion_codes)
+        & (parent_links["codigo"] != parent_links["ies_padre_codigo"])
+    ]
+    dropped_links = total_links - len(parent_links)
+    if dropped_links > 0:
+        log(f"Tabla 'INSTITUCION': {dropped_links} relación(es) padre omitida(s) por referencia inválida.")
+
+    if not parent_links.empty:
+        updates = [(row.ies_padre_codigo, row.codigo) for row in parent_links.itertuples(index=False)]
+        cursor.executemany("UPDATE `INSTITUCION` SET `ies_padre_codigo` = %s WHERE `codigo` = %s", updates)
+        log(f"Tabla 'INSTITUCION': {len(updates)} relación(es) padre actualizada(s).")
+
+    return institucion_codes
 
 
 def _insert_if_empty(cursor, table_name: str, columns: list[str], df: pd.DataFrame, log: Callable[[str], None]) -> None:
@@ -932,14 +1080,11 @@ def _insert_data_into_open_connection(
     tipo_contrato = _build_text_dimension("tipo_contrato", docentes_df)
 
     _insert_dataframe(cursor, "DEPARTAMENTO", ["codigo", "nombre"], departamentos, connector_log)
+    departamento_codes = _fetch_existing_values(cursor, "DEPARTAMENTO", "codigo")
+    municipios = _nullify_invalid_fk_values(municipios, "departamento_codigo", departamento_codes, "MUNICIPIO", connector_log)
     _insert_dataframe(cursor, "MUNICIPIO", ["codigo", "nombre", "departamento_codigo"], municipios, connector_log)
-    _insert_dataframe(
-        cursor,
-        "INSTITUCION",
-        ["codigo", "nombre", "sector", "caracter", "tipo", "municipio_codigo", "ies_padre_codigo"],
-        instituciones,
-        connector_log,
-    )
+    municipio_codes = _fetch_existing_values(cursor, "MUNICIPIO", "codigo")
+    institucion_codes = _insert_instituciones_dimension(cursor, instituciones, municipio_codes, connector_log)
     _insert_dataframe(cursor, "AREA_CONOCIMIENTO", ["nombre"], areas, connector_log)
     _insert_dataframe(cursor, "NBC", ["nombre"], nbc, connector_log)
     _insert_dataframe(cursor, "CINE_CAMPO_AMPLIO", ["nombre"], cine_amplio, connector_log)
@@ -979,9 +1124,20 @@ def _insert_data_into_open_connection(
         connector_log,
     )
 
+    programa_codes = _fetch_existing_values(cursor, "PROGRAMA", "codigo_snies")
+    municipio_codes = _fetch_existing_values(cursor, "MUNICIPIO", "codigo")
+    if not institucion_codes:
+        institucion_codes = _fetch_existing_values(cursor, "INSTITUCION", "codigo")
+
     admin_fact = _build_fact_admin(admin_df)
     docentes_fact = _build_fact_docentes(docentes_df)
     estudiantes_fact = _build_fact_estudiantes(students)
+
+    admin_fact = _drop_rows_with_missing_fk(admin_fact, "institucion_codigo", institucion_codes, "HECHO_ADMINISTRATIVOS", connector_log)
+    docentes_fact = _drop_rows_with_missing_fk(docentes_fact, "institucion_codigo", institucion_codes, "HECHO_DOCENTES", connector_log)
+    estudiantes_fact = _drop_rows_with_missing_fk(estudiantes_fact, "institucion_codigo", institucion_codes, "HECHO_ESTUDIANTES", connector_log)
+    estudiantes_fact = _drop_rows_with_missing_fk(estudiantes_fact, "programa_codigo", programa_codes, "HECHO_ESTUDIANTES", connector_log)
+    estudiantes_fact = _nullify_invalid_fk_values(estudiantes_fact, "municipio_programa_codigo", municipio_codes, "HECHO_ESTUDIANTES", connector_log)
 
     if not admin_fact.empty:
         _insert_if_empty(
@@ -1064,9 +1220,12 @@ def _load_mysql(connector_log: Callable[[str], None], admin_df: pd.DataFrame | N
         db_conn.close()
 
 
-def crear_base_y_tablas(progress_cb: Callable[[str], None] | None = None) -> bool:
+def crear_base_y_tablas(progress_cb: Callable[[str], None] | None = None, recreate: bool = False) -> bool:
     log = _log_factory(progress_cb)
-    log("Creando/verificando base de datos y tablas SNIES en MySQL.")
+    if recreate:
+        log("Recreando base de datos y tablas SNIES en MySQL desde cero.")
+    else:
+        log("Creando/verificando base de datos y tablas SNIES en MySQL.")
     try:
         server_conn = _connect_mysql_server()
     except Exception as exc:
@@ -1076,7 +1235,10 @@ def crear_base_y_tablas(progress_cb: Callable[[str], None] | None = None) -> boo
     try:
         server_conn.autocommit = True
         server_cursor = server_conn.cursor()
-        _ensure_database(server_cursor, log)
+        if recreate:
+            _recreate_database(server_cursor, log)
+        else:
+            _ensure_database(server_cursor, log)
     except Exception as exc:
         log(f"Error creando/verificando base de datos: {exc}")
         return False
@@ -1112,11 +1274,14 @@ def crear_base_y_tablas(progress_cb: Callable[[str], None] | None = None) -> boo
         db_conn.close()
 
 
-def insertar_datos_csv(progress_cb: Callable[[str], None] | None = None) -> bool:
+def insertar_datos_csv(progress_cb: Callable[[str], None] | None = None, recreate: bool = False) -> bool:
     log = _log_factory(progress_cb)
-    log("Iniciando inserción manual de datos CSV a MySQL.")
+    log("Iniciando inserción de datos CSV a MySQL.")
 
-    if not crear_base_y_tablas(progress_cb=progress_cb):
+    if recreate:
+        log("Se recreará el esquema MySQL antes de insertar para asegurar consistencia.")
+
+    if not crear_base_y_tablas(progress_cb=progress_cb, recreate=recreate):
         log("Inserción cancelada: no fue posible preparar el esquema de base de datos.")
         return False
 

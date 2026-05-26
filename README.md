@@ -71,7 +71,7 @@ Qué hace cada módulo:
 La sincronización con MySQL ahora es manual desde la interfaz gráfica:
 
 - `🛠️ Crear BD y tablas`: crea/verifica la base de datos `snies` y todas las tablas del modelo.
-- `📥 Insertar CSV en MySQL`: inserta los datos de los CSV maestros en las tablas.
+- `📥 Insertar CSV en MySQL`: verifica el esquema si hace falta y carga los datos de los CSV maestros en la base existente.
 
 Ninguna de estas acciones se ejecuta automáticamente al abrir la aplicación.
 

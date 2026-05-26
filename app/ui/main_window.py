@@ -16,6 +16,7 @@ from app.core.mysql_snies_setup import crear_base_y_tablas, insertar_datos_csv
 from app.core.preprocessing_service import preprocesar_csv_maestro
 from app.ui.preprocessing_window import VentanaPreprocesamiento
 from app.ui.google_drive_window import VentanaGoogleDriveImport
+from app.ui.pipeline_window import VentanaPipelineCategorias
 
 load_dotenv()
 
@@ -188,6 +189,7 @@ class SNIESConsolidador:
         archivo_menu = tk.Menu(menubar, tearoff=0, bg='white', fg=self.COLOR_TEXT)
         archivo_menu.add_command(label="📂 Cargar Excel(s)", command=self.cargar_archivos)
         archivo_menu.add_command(label="☁️ Cargar desde Google Drive", command=self.cargar_desde_google_drive)
+        archivo_menu.add_command(label="🚀 Pipeline por categorías", command=self.ejecutar_pipeline_categorias)
         archivo_menu.add_command(label="⚙️ Preprocesar CSV actual", command=self.preprocesar_csv_actual)
         archivo_menu.add_separator()
         archivo_menu.add_command(label="🛠️ Crear BD y tablas (MySQL)", command=self.crear_bd_tablas_mysql)
@@ -236,6 +238,15 @@ class SNIESConsolidador:
         btn_cargar_drive.pack(fill=tk.X, pady=2)
         ToolTip(btn_cargar_drive, "Abre el gestor Google Drive para descargar y seleccionar archivos antes de integrarlos")
 
+        btn_pipeline = ttk.Button(
+            acciones_card,
+            text="🚀 Ejecutar pipeline por categorías",
+            command=self.ejecutar_pipeline_categorias,
+            style='Success.TButton',
+        )
+        btn_pipeline.pack(fill=tk.X, pady=2)
+        ToolTip(btn_pipeline, "Descarga nuevos archivos de Drive, integra, limpia e inserta en MySQL por categoría")
+
         btn_preprocesar = ttk.Button(acciones_card, text="🧹 Preprocesar CSV", command=self.abrir_preprocesamiento, style='Accent.TButton')
         btn_preprocesar.pack(fill=tk.X, pady=2)
         ToolTip(btn_preprocesar, "Abre una ventana para limpiar y transformar el CSV maestro del tipo actual")
@@ -250,7 +261,7 @@ class SNIESConsolidador:
 
         btn_mysql_insert = ttk.Button( acciones_card, text="📥 Insertar CSV en MySQL", command=self.insertar_datos_mysql, style='Success.TButton')
         btn_mysql_insert.pack(fill=tk.X, pady=2)
-        ToolTip(btn_mysql_insert, "Inserta manualmente los datos CSV en MySQL")
+        ToolTip(btn_mysql_insert, "Inserta los datos de los CSV maestros en la base 'snies'")
 
         btn_encabezados = ttk.Button(acciones_card, text="🔍 Ver encabezados", command=self.ver_encabezados, style='Accent.TButton')
         btn_encabezados.pack(fill=tk.X, pady=2)
@@ -549,7 +560,19 @@ class SNIESConsolidador:
         """Abre la ventana dedicada de Google Drive."""
         VentanaGoogleDriveImport(self.root, self)
 
-    def procesar_un_archivo(self, archivo, tipo_forzado=None, confirmar_encabezados=True, reemplazar_duplicados=False):
+    def ejecutar_pipeline_categorias(self):
+        """Abre la ventana de pipeline por categorías con logs en tiempo real."""
+        VentanaPipelineCategorias(self.root, self)
+
+    def procesar_un_archivo(
+        self,
+        archivo,
+        tipo_forzado=None,
+        confirmar_encabezados=True,
+        reemplazar_duplicados=False,
+        show_ui_errors=True,
+        permitir_año_manual=True,
+    ):
         tipo = tipo_forzado or self.tipo_seleccionado.get()
         nombre = os.path.basename(archivo)
         print(f"[Procesamiento] Iniciando {nombre} | tipo={tipo}")
@@ -569,14 +592,16 @@ class SNIESConsolidador:
         try:
             df_muestra = self._leer_tabular(archivo, header=fila_inicio, nrows=100, sheet_name=hoja_datos)
             if df_muestra.empty:
-                messagebox.showwarning("Archivo vacío", f"{nombre}: no se encontraron datos.")
+                if show_ui_errors:
+                    messagebox.showwarning("Archivo vacío", f"{nombre}: no se encontraron datos.")
                 return False
             columnas_detectadas = [limpiar_nombre_columna(c) for c in df_muestra.columns]
             año = self._extraer_año_desde_df(df_muestra)
             if año is None:
                 año = extraer_año_desde_archivo(archivo, sheet_name=hoja_datos)
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
+            if show_ui_errors:
+                messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
             print(f"[Procesamiento] Error leyendo {nombre}: {e}")
             return False
 
@@ -595,7 +620,8 @@ class SNIESConsolidador:
             df.dropna(how="all", axis=1, inplace=True)
             df.dropna(how="all", axis=0, inplace=True)
             if df.empty:
-                messagebox.showwarning("Sin datos", f"{nombre}: no hay datos después de la limpieza.")
+                if show_ui_errors:
+                    messagebox.showwarning("Sin datos", f"{nombre}: no hay datos después de la limpieza.")
                 print(f"[Procesamiento] Sin datos despues de limpieza: {nombre}")
                 return False
 
@@ -626,13 +652,14 @@ class SNIESConsolidador:
             año = self._extraer_año_desde_df(df_consolidado)
             if año is None:
                 año = extraer_año_desde_archivo(archivo, sheet_name=hoja_datos)
-            if año is None:
+            if año is None and permitir_año_manual:
                 # Solo pedir manual cuando se agotaron todas las detecciones automáticas.
                 año = self._pedir_año_manual_desde_ui()
-                if año is None:
+            if año is None:
+                if show_ui_errors:
                     messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
-                    print(f"[Procesamiento] No se pudo detectar año: {nombre}")
-                    return False
+                print(f"[Procesamiento] No se pudo detectar año: {nombre}")
+                return False
             # Intentar asignar usando la utilidad; si no hay columna canónica de año, crearla como fallback
             ok_asign = asignar_año_a_dataframe(df_consolidado, año)
             if not ok_asign:
@@ -687,7 +714,8 @@ class SNIESConsolidador:
             return True
 
         except Exception as e:
-            messagebox.showerror("Error", f"Error al procesar {nombre}:\n{e}")
+            if show_ui_errors:
+                messagebox.showerror("Error", f"Error al procesar {nombre}:\n{e}")
             print(f"[Procesamiento] Error procesando {nombre}: {e}")
             return False
 
@@ -1053,7 +1081,7 @@ class SNIESConsolidador:
     def insertar_datos_mysql(self):
         if not messagebox.askyesno(
             "Insertar datos en MySQL",
-            "Se insertarán manualmente los datos CSV en la base 'snies'.\n¿Desea continuar?",
+            "Se insertarán los datos de los CSV maestros en la base 'snies'.\n¿Desea continuar?",
         ):
             return
         self.status_var.set("MySQL: insertando datos CSV...")
