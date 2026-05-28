@@ -8,3 +8,4 @@ credentials*.json
 .csv
 __pycache__/
 *.pyc
+eer_snies_modelo_mermaid.md

@@ -1,6 +1,7 @@
 import os
 import tkinter as tk
 from tkinter import messagebox, ttk
+import pandas as pd
 
 from app.core.preprocessing_service import (
     cargar_csv,
@@ -8,7 +9,10 @@ from app.core.preprocessing_service import (
     detectar_inconsistencias_df,
     guardar_csv,
     limpiar_df_base,
+    normalizar_sexo_df,
+    nulificar_celdas_vacias_df,
 )
+from app.core.year_utils import get_año_col_name
 
 
 class VentanaPreprocesamiento:
@@ -18,6 +22,7 @@ class VentanaPreprocesamiento:
         self.csv_path = csv_path
         self.app = app
         self.df = None
+        self._lookup_reporte: dict[tuple[str, str], int] = {}
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Preprocesamiento - {tipo}")
@@ -28,6 +33,12 @@ class VentanaPreprocesamiento:
 
         self._crear_interfaz()
         self._cargar_datos()
+
+    def _resolver_columna_anio(self):
+        if self.df is None:
+            return None
+        # Delegar a la utilidad centralizada
+        return get_año_col_name(self.df)
 
     def _crear_interfaz(self):
         toolbar = ttk.Frame(self.win, padding=10)
@@ -51,6 +62,11 @@ class VentanaPreprocesamiento:
 
         ttk.Button(toolbar, text="Aplicar limpieza al ámbito",
                    command=self.aplicar_limpieza_ambito, style='Accent.TButton').pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
+
+        ttk.Button(toolbar, text="Normalizar sexo/género",
+               command=self.normalizar_sexo_ambito, style='Accent.TButton').pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
 
@@ -94,23 +110,23 @@ class VentanaPreprocesamiento:
             self.win.destroy()
 
     def _actualizar_vista(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self.tree.delete(*self.tree.get_children())
         if self.df is None or self.df.empty:
             return
         self.tree['columns'] = list(self.df.columns)
         for col in self.df.columns:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=100)
-        for i, (_, row) in enumerate(self.df.head(200).iterrows()):
-            self.tree.insert('', 'end', values=list(row))
+        for row in self.df.head(200).itertuples(index=False):
+            self.tree.insert('', 'end', values=row)
 
     def _actualizar_combobox_años(self):
-        if self.df is None or 'Año' not in self.df.columns:
+        col_anio = self._resolver_columna_anio()
+        if self.df is None or col_anio is None:
             self.cb_años['values'] = ["Todos"]
             self.año_seleccionado.set("Todos")
             return
-        años = sorted(self.df['Año'].dropna().unique())
+        años = sorted(self.df[col_anio].dropna().unique())
         años_int = []
         for a in años:
             try:
@@ -126,23 +142,33 @@ class VentanaPreprocesamiento:
         seleccion = self.año_seleccionado.get()
         if seleccion == "Todos":
             return self.df, None
+        col_anio = self._resolver_columna_anio()
+        if col_anio is None:
+            messagebox.showerror("Error", "No se encontró columna de año en el CSV.")
+            return None, None
         try:
             año = int(seleccion)
         except ValueError:
             messagebox.showerror("Error", "Año inválido.")
             return None, None
-        mask = self.df['Año'].astype(int) == año
+        mask = pd.to_numeric(self.df[col_anio], errors='coerce').fillna(0).astype(int) == año
         return self.df[mask], mask
 
     # ---------- Transformaciones ----------
     def quitar_filas_vacias(self):
         if self.df is None:
             return
-        self.status_var.set("Eliminando filas completamente vacías (todo el dataset)...")
+        self.status_var.set("Analizando celdas vacías y valores nulos en el dataset...")
+        self.df, n_vacias, n_sin_info = nulificar_celdas_vacias_df(self.df)
         antes = len(self.df)
         self.df.dropna(how='all', inplace=True)
         self._actualizar_vista()
-        self.status_var.set(f"Filas vacías eliminadas: {antes - len(self.df)} (total ahora: {len(self.df)})")
+        self.status_var.set(
+            f"Celdas vacías → NaN: {n_vacias} | "
+            f"'Sin información' → NaN: {n_sin_info} | "
+            f"Filas eliminadas: {antes - len(self.df)} | "
+            f"Total filas: {len(self.df)}"
+        )
 
     def convertir_tipos(self):
         if self.df is None:
@@ -151,6 +177,31 @@ class VentanaPreprocesamiento:
         self.df = convertir_tipos_df(self.df)
         self._actualizar_vista()
         self.status_var.set("Conversión de tipos finalizada.")
+
+    def normalizar_sexo_ambito(self):
+        if self.df is None:
+            return
+        if not messagebox.askyesno(
+            "Normalizar sexo/género",
+            "Se normalizarán los valores de sexo/género en el ámbito seleccionado."
+        ):
+            return
+
+        sub, mask = self._obtener_subconjunto()
+        if sub is None or sub.empty:
+            messagebox.showwarning("Sin datos", "No hay datos para el ámbito seleccionado.")
+            return
+
+        self.status_var.set("Normalizando sexo/género...")
+        sub = normalizar_sexo_df(sub.copy())
+
+        if mask is not None:
+            self.df.loc[mask] = sub
+        else:
+            self.df = sub
+
+        self._actualizar_vista()
+        self.status_var.set("Normalización de sexo/género completada.")
 
     def aplicar_limpieza_ambito(self):
         if self.df is None:
@@ -257,13 +308,17 @@ class VentanaPreprocesamiento:
         ttk.Button(top_frame, text="Deseleccionar visibles",
                    command=lambda: self._marcar_todas(False)).pack(side=tk.LEFT, padx=5)
 
-        self.tree_inconsistencias = ttk.Treeview(ventana_reporte,
-                                                 columns=('Seleccionar', 'columna', 'actual', 'frec_actual',
-                                                          'canonico', 'frec_canonico'),
-                                                 show='headings', selectmode='none',
-                                                 style="Incon.Treeview")
+        self.tree_inconsistencias = ttk.Treeview(
+            ventana_reporte,
+            columns=('Seleccionar', 'Invertir', 'columna', 'actual', 'frec_actual', 'canonico', 'frec_canonico'),
+            show='headings',
+            selectmode='none',
+            style="Incon.Treeview",
+        )
         self.tree_inconsistencias.heading('Seleccionar', text='✔')
         self.tree_inconsistencias.column('Seleccionar', width=30, anchor='center')
+        self.tree_inconsistencias.heading('Invertir', text='↔')
+        self.tree_inconsistencias.column('Invertir', width=30, anchor='center')
         self.tree_inconsistencias.heading('columna', text='Columna',
                                           command=lambda: self._ordenar_por('columna'))
         self.tree_inconsistencias.column('columna', width=150)
@@ -295,16 +350,25 @@ class VentanaPreprocesamiento:
             if self.df is None:
                 messagebox.showwarning("Sin datos", "No hay datos cargados para aplicar cambios.")
                 return
-            seleccionados = [self.reporte_completo[i] for i, estado in enumerate(self.estados_checkboxes) if estado]
+            seleccionados = [i for i, estado in enumerate(self.estados_checkboxes) if estado]
             if not seleccionados:
                 messagebox.showinfo("Sin selección", "No ha marcado ninguna variación.")
                 return
-            for r in seleccionados:
+            for idx in seleccionados:
+                r = self.reporte_completo[idx]
                 col = r['columna']
-                mask = sub_df[col] == r['valor_actual']
-                sub_df.loc[mask, col] = r['valor_canonico']
+                if self.invertir_checkboxes[idx]:
+                    mask = sub_df[col] == r['valor_canonico']
+                    sub_df.loc[mask, col] = r['valor_actual']
+                else:
+                    mask = sub_df[col] == r['valor_actual']
+                    sub_df.loc[mask, col] = r['valor_canonico']
             if self.año_seleccionado.get() != "Todos":
-                mask_orig = self.df['Año'].astype(int) == int(self.año_seleccionado.get())
+                col_anio = self._resolver_columna_anio()
+                if col_anio is None:
+                    messagebox.showerror("Error", "No se encontró columna de año para aplicar cambios por ámbito.")
+                    return
+                mask_orig = pd.to_numeric(self.df[col_anio], errors='coerce').fillna(0).astype(int) == int(self.año_seleccionado.get())
                 self.df.loc[mask_orig] = sub_df
             else:
                 self.df = sub_df
@@ -321,30 +385,36 @@ class VentanaPreprocesamiento:
 
         self.reporte_completo = reporte
         self.estados_checkboxes = [True] * len(reporte)
+        self.invertir_checkboxes = [False] * len(reporte)
         self.orden_actual = ('columna', False)
+        self._lookup_reporte = {(r['columna'], r['valor_actual']): i for i, r in enumerate(reporte)}
         self._refrescar_tabla_inconsistencias()
 
     # ---------- Métodos para la tabla de inconsistencias ----------
     def _toggle_checkbox(self, event):
         region = self.tree_inconsistencias.identify_region(event.x, event.y)
-        if region != 'cell': return
+        if region != 'cell':
+            return
         col = self.tree_inconsistencias.identify_column(event.x)
-        if col != '#1': return
+        if col not in ('#1', '#2'):
+            return
         item = self.tree_inconsistencias.identify_row(event.y)
-        if not item: return
-        idx = self.tree_inconsistencias.index(item)
-        items_filtrados = self.tree_inconsistencias.get_children()
-        if idx < len(items_filtrados):
-            item_id = items_filtrados[idx]
-            valores = self.tree_inconsistencias.item(item_id)['values']
-            if valores:
-                col_actual = valores[1]
-                val_actual = valores[2]
-                for i, r in enumerate(self.reporte_completo):
-                    if r['columna'] == col_actual and r['valor_actual'] == val_actual:
-                        self.estados_checkboxes[i] = not (valores[0] == '☑')
-                        break
-                self._refrescar_tabla_inconsistencias()
+        if not item:
+            return
+
+        valores = self.tree_inconsistencias.item(item, 'values')
+        if not valores:
+            return
+
+        idx = self._lookup_reporte.get((valores[2], valores[3]))
+        if idx is None:
+            return
+
+        if col == '#1':
+            self.estados_checkboxes[idx] = not (valores[0] == '☑')
+        else:
+            self.invertir_checkboxes[idx] = not (valores[1] == '☑')
+        self._refrescar_tabla_inconsistencias()
 
     def _marcar_todas(self, estado):
         """Marcar/desmarcar solo las filas visibles según el filtro de columna."""
@@ -367,8 +437,7 @@ class VentanaPreprocesamiento:
         self._refrescar_tabla_inconsistencias()
 
     def _refrescar_tabla_inconsistencias(self):
-        for item in self.tree_inconsistencias.get_children():
-            self.tree_inconsistencias.delete(item)
+        self.tree_inconsistencias.delete(*self.tree_inconsistencias.get_children())
         filtro = self.filtro_columna_var.get()
         # Colores alternos para las filas
         color_par = '#f5f5f5'
@@ -380,9 +449,14 @@ class VentanaPreprocesamiento:
             marca = '☑' if self.estados_checkboxes[i] else '☐'
             color = color_par if row_count % 2 == 0 else color_impar
             item_id = self.tree_inconsistencias.insert('', 'end', iid=f"r{i}",
-                                                       values=(marca, r['columna'], r['valor_actual'],
+                                       values=(
+                                       marca,
+                                       '☑' if self.invertir_checkboxes[i] else '☐',
+                                       r['columna'],
+                                       r['valor_actual'],
                                                                r['frecuencia_actual'], r['valor_canonico'],
-                                                               r['frecuencia_canonico']),
+                                           r['frecuencia_canonico'],
+                                       ),
                                                        tags=(color,))
             row_count += 1
         # Configurar apariencia de las etiquetas
