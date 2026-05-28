@@ -1,85 +1,73 @@
 # ProyectoFinalMineria
 
-Estructura refactorizada para separar responsabilidades entre interfaz y lógica.
+Repositorio para ingestión, limpieza, emparejamiento y análisis de datos SNIES. La aplicación provee una interfaz gráfica para importar datos locales o desde Google Drive, ejecutar pipelines de limpieza y cargar resultados a MySQL.
 
-## Estructura del proyecto
+## Documentación
 
-app/
-- config/
-  - paths.py                      Configuración de rutas del proyecto
-- core/
-  - matching.py                   Lógica de similitud y mapeo de columnas
-  - preprocessing_service.py      Lógica de carga, limpieza y guardado de CSV
-- ui/
-  - main_window.py                Interfaz principal de carga y consolidación
-  - preprocessing_window.py       Interfaz de preprocesamiento visual
+- Documentación del sistema y arquitectura: [SISTEMA_COMPLETO.md](docs/SISTEMA_COMPLETO.md)
+- Documentación paso a paso del pipeline: [PIPELINE_PASO_A_PASO.md](docs/PIPELINE_PASO_A_PASO.md)
 
-main.py                           Punto de entrada principal (wrapper)
-preprocesamiento.py               Exportador de compatibilidad (wrapper)
-data/                             Archivos CSV y metadatos
+## Resumen rápido
 
-Flujo recomendado:
+- Entradas: archivos `.csv`, `.xlsx`, `.xls` (locales o desde Google Drive).
+- Carpeta de trabajo local para importaciones: `data/gdrive_import/`.
+- Salida: CSV maestros en `data/` y (opcional) cargas a MySQL.
 
-1. Cargar archivos Excel desde [main.py](main.py).
-2. Consolidar y guardar CSV maestro en data/.
-3. Preprocesar el CSV consolidado con una de estas opciones:
-	 - Opción interactiva: botón Preprocesar CSV (abre la ventana de edición).
-	 - Opción rápida: botón Preprocesar CSV actual (aplica limpieza base automática).
+## Estructura principal
 
-## Carga automática desde Google Drive
+- `main.py` — punto de entrada de la aplicación GUI.
+- `preprocesamiento.py` — utilidades de preprocesamiento y wrappers.
+- `app/config/paths.py` — rutas y constantes del proyecto.
+- `app/core/` — lógica de negocio: `google_drive_loader.py`, `preprocessing_service.py`, `matching.py`, `mysql_snies_setup.py`, `year_utils.py`.
+- `app/ui/` — interfaces gráficas: `main_window.py`, `pipeline_window.py`, `preprocessing_window.py`, `google_drive_window.py`.
+- `data/` — CSV de entrada, reportes y `gdrive_import/`.
 
-También puedes usar la opción `Cargar desde Google Drive` en el menú Archivo o en el panel de acciones.
+## Quick start
 
-Estructura esperada en Drive dentro de la carpeta `datos_snies`:
+1. Crear entorno virtual e instalar dependencias:
 
-- Estudiantes_admitidos
-- Estudiantes_inscritos
-- Estudiantes_matriculados
-- Estudiantes_matriculados_en_primer_curso
-- Estudiantes_graduados
-- Docentes
-- Administrativos
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
 
-Dentro de cada carpeta se leen archivos `.xlsx`, `.xls`, `.csv` y Google Sheets.
-Las Google Sheets se exportan automáticamente a Excel para su procesamiento.
+2. Ejecutar la aplicación GUI:
 
-Requisitos:
+```powershell
+python main.py
+```
 
-1. Compartir la carpeta `datos_snies` con la cuenta de servicio de Google.
-2. Tener el archivo de credenciales JSON de esa cuenta.
-3. Al ejecutar la opción, ingresar el ID de la carpeta de Drive y seleccionar el JSON.
+3. Ejecutar solo el preprocesamiento (opcional):
 
-Qué hace cada módulo:
+```powershell
+python preprocesamiento.py
+```
 
-- [main.py](main.py)
-	- Inicia la aplicación gráfica principal.
+## Ejecutar el pipeline automático por categorías
 
-- [preprocesamiento.py](preprocesamiento.py)
-	- Reexporta funciones y clases para mantener compatibilidad.
+1. Abrir la ventana `Pipeline automatico por categorias` en la UI.
+2. Proveer `ID carpeta Drive` y seleccionar `Credenciales JSON`.
+3. Seleccionar categorías y presionar `Iniciar pipeline`.
 
-- [app/core/preprocessing_service.py](app/core/preprocessing_service.py)
-	- Contiene el pipeline de limpieza de CSV sin dependencias de Tkinter.
+El pipeline descargará archivos nuevos a `data/gdrive_import/`, integrará los archivos al CSV maestro, limpiará los datos y (si está configurado) insertará los datos en MySQL.
 
-- [app/ui/preprocessing_window.py](app/ui/preprocessing_window.py)
-	- Contiene solo la interfaz de preprocesamiento.
+## Variables de entorno relevantes
 
-- [app/ui/main_window.py](app/ui/main_window.py)
-	- Contiene la interfaz principal y consume servicios de app/core.
+- `GOOGLE_DRIVE_FOLDER_ID` (opcional) — ID de carpeta por defecto.
+- `GOOGLE_DRIVE_CREDENTIALS_JSON_PATH` (opcional) — ruta por defecto al JSON de credenciales.
+- `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD` — conexión MySQL.
 
-## Sincronización con MySQL
+## Depuración y logs
 
-La sincronización con MySQL ahora es manual desde la interfaz gráfica:
+- La UI muestra un panel de logs en `Pipeline automatico por categorias` con prefijos `[DRIVE]`, `[PIPELINE]`, `[MYSQL]`.
+- Mensajes y errores críticos aparecen en la consola donde se ejecuta `main.py`.
 
-- `🛠️ Crear BD y tablas`: crea/verifica la base de datos `snies` y todas las tablas del modelo.
-- `📥 Insertar CSV en MySQL`: verifica el esquema si hace falta y carga los datos de los CSV maestros en la base existente.
+## Contribuir
 
-Ninguna de estas acciones se ejecuta automáticamente al abrir la aplicación.
+- Para cambios funcionales, crea una rama, realiza pruebas locales y abre una Pull Request.
+- Mantén las reglas de `matching` y transformaciones versionadas (recomendado en archivos de configuración).
 
-La conexión usa estas variables de entorno opcionales:
+---
 
-- `MYSQL_HOST` (por defecto `localhost`)
-- `MYSQL_PORT` (por defecto `3306`)
-- `MYSQL_USER` (por defecto `root`)
-- `MYSQL_PASSWORD` (por defecto vacío)
-
-Si MySQL no responde o las credenciales no son válidas, la app sigue abriendo y deja el error registrado en consola.
+Si quieres, puedo añadir badges, ejemplos de configuración de `requirements.txt`, o actualizar automáticamente el `README` en el repositorio remoto (commit y push). 
