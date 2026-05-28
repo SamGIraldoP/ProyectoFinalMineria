@@ -4,10 +4,19 @@ import pandas as pd
 import os
 from dotenv import load_dotenv
 from app.config.paths import DATA_DIR
-from app.core.matching import limpiar_nombre_columna, mapear_columnas_expandible, normalizar_para_match, similitud_combinada
-from app.core.google_drive_loader import descargar_datasets_desde_drive
-from app.core.preprocessing_service import preprocesar_csv_maestro
+from app.core.matching import limpiar_nombre_columna, mapear_columnas_expandible
+from app.core.year_utils import (
+    get_año_col_name,
+    extraer_año_desde_dataframe,
+    pedir_año_manual,
+    asignar_año_a_dataframe,
+    extraer_año_desde_archivo,
+)
+from app.core.mysql_snies_setup import crear_base_y_tablas, insertar_datos_csv
+from app.core.preprocessing_service import preprocesar_csv_maestro, eliminar_pies_de_pagina_df
 from app.ui.preprocessing_window import VentanaPreprocesamiento
+from app.ui.google_drive_window import VentanaGoogleDriveImport
+from app.ui.pipeline_window import VentanaPipelineCategorias
 
 load_dotenv()
 
@@ -95,7 +104,7 @@ class SNIESConsolidador:
             "Área de Conocimiento", "Núcleo Básico del Conocimiento (NBC)",
             "Código del Departamento (Programa)", "Departamento de oferta del programa",
             "Código del Municipio (Programa)", "Municipio de oferta del programa",
-            "Sexo", "Año", "Semestre", "Matriculados 2017"
+                "Sexo", "Año", "Semestre", "Matriculados"
         ],
         "Estudiantes matriculados en primer curso": [
             "CÓDIGO DE LA INSTITUCIÓN", "IES_PADRE", "INSTITUCIÓN DE EDUCACIÓN SUPERIOR (IES)",
@@ -180,7 +189,11 @@ class SNIESConsolidador:
         archivo_menu = tk.Menu(menubar, tearoff=0, bg='white', fg=self.COLOR_TEXT)
         archivo_menu.add_command(label="📂 Cargar Excel(s)", command=self.cargar_archivos)
         archivo_menu.add_command(label="☁️ Cargar desde Google Drive", command=self.cargar_desde_google_drive)
+        archivo_menu.add_command(label="🚀 Pipeline por categorías", command=self.ejecutar_pipeline_categorias)
         archivo_menu.add_command(label="⚙️ Preprocesar CSV actual", command=self.preprocesar_csv_actual)
+        archivo_menu.add_separator()
+        archivo_menu.add_command(label="🛠️ Crear BD y tablas (MySQL)", command=self.crear_bd_tablas_mysql)
+        archivo_menu.add_command(label="📥 Insertar CSV en MySQL", command=self.insertar_datos_mysql)
         archivo_menu.add_separator()
         archivo_menu.add_command(label="🧹 Limpiar todo el tipo", command=self.limpiar_datos)
         archivo_menu.add_separator()
@@ -221,35 +234,42 @@ class SNIESConsolidador:
         btn_cargar.pack(fill=tk.X, pady=2)
         ToolTip(btn_cargar, "Selecciona uno o varios archivos Excel para cargar")
 
-        btn_cargar_drive = ttk.Button(
-            acciones_card,
-            text="☁️ Cargar desde Google Drive",
-            command=self.cargar_desde_google_drive,
-            style='Primary.TButton',
-        )
+        btn_cargar_drive = ttk.Button(acciones_card, text="☁️ Cargar desde Google Drive", command=self.cargar_desde_google_drive, style='Primary.TButton')
         btn_cargar_drive.pack(fill=tk.X, pady=2)
-        ToolTip(btn_cargar_drive, "Descarga datasets desde la carpeta datos_snies en Google Drive y los integra automáticamente")
+        ToolTip(btn_cargar_drive, "Abre el gestor Google Drive para descargar y seleccionar archivos antes de integrarlos")
 
-        btn_limpiar = ttk.Button(acciones_card, text="🧹 Limpiar todo", command=self.limpiar_datos, style='Warning.TButton')
-        btn_limpiar.pack(fill=tk.X, pady=2)
-        ToolTip(btn_limpiar, "Elimina todos los datasets del tipo actual y borra el CSV asociado")
+        btn_pipeline = ttk.Button(
+            acciones_card,
+            text="🚀 Ejecutar pipeline por categorías",
+            command=self.ejecutar_pipeline_categorias,
+            style='Success.TButton',
+        )
+        btn_pipeline.pack(fill=tk.X, pady=2)
+        ToolTip(btn_pipeline, "Descarga nuevos archivos de Drive, integra, limpia e inserta en MySQL por categoría")
+
+        btn_preprocesar = ttk.Button(acciones_card, text="🧹 Preprocesar CSV", command=self.abrir_preprocesamiento, style='Accent.TButton')
+        btn_preprocesar.pack(fill=tk.X, pady=2)
+        ToolTip(btn_preprocesar, "Abre una ventana para limpiar y transformar el CSV maestro del tipo actual")
+
+        btn_preprocesar_auto = ttk.Button(acciones_card, text="⚙️ Preprocesar CSV actual", command=self.preprocesar_csv_actual, style='Accent.TButton')
+        btn_preprocesar_auto.pack(fill=tk.X, pady=2)
+        ToolTip(btn_preprocesar_auto, "Aplica el pipeline base de limpieza directamente sobre el CSV maestro")
+
+        btn_mysql_schema = ttk.Button( acciones_card, text="🛠️ Crear BD y tablas", command=self.crear_bd_tablas_mysql, style='Success.TButton')
+        btn_mysql_schema.pack(fill=tk.X, pady=2)
+        ToolTip(btn_mysql_schema, "Crea/verifica la base 'snies' y todas sus tablas en MySQL")
+
+        btn_mysql_insert = ttk.Button( acciones_card, text="📥 Insertar CSV en MySQL", command=self.insertar_datos_mysql, style='Success.TButton')
+        btn_mysql_insert.pack(fill=tk.X, pady=2)
+        ToolTip(btn_mysql_insert, "Inserta los datos de los CSV maestros en la base 'snies'")
 
         btn_encabezados = ttk.Button(acciones_card, text="🔍 Ver encabezados", command=self.ver_encabezados, style='Accent.TButton')
         btn_encabezados.pack(fill=tk.X, pady=2)
         ToolTip(btn_encabezados, "Muestra los nombres de columna esperados para este tipo")
 
-        btn_preprocesar = ttk.Button(acciones_card, text="🧹 Preprocesar CSV", command=self.abrir_preprocesamiento, style='Warning.TButton')
-        btn_preprocesar.pack(fill=tk.X, pady=2)
-        ToolTip(btn_preprocesar, "Abre una ventana para limpiar y transformar el CSV maestro del tipo actual")
-
-        btn_preprocesar_auto = ttk.Button(
-            acciones_card,
-            text="⚙️ Preprocesar CSV actual",
-            command=self.preprocesar_csv_actual,
-            style='Accent.TButton'
-        )
-        btn_preprocesar_auto.pack(fill=tk.X, pady=2)
-        ToolTip(btn_preprocesar_auto, "Aplica el pipeline base de limpieza directamente sobre el CSV maestro")
+        btn_limpiar = ttk.Button(acciones_card, text="🧹 Limpiar todo", command=self.limpiar_datos, style='Warning.TButton')
+        btn_limpiar.pack(fill=tk.X, pady=2)
+        ToolTip(btn_limpiar, "Elimina todos los datasets del tipo actual y borra el CSV asociado")
 
         # Panel derecho (datasets + resumen)
         right_frame = ttk.Frame(main_frame)
@@ -334,13 +354,18 @@ class SNIESConsolidador:
             canonicas = self.obtener_canonicas(tipo)
             if canonicas is None:
                 canonicas = list(df.columns)
-            self.data[tipo] = {"headers": canonicas, "datasets": []}
-            if "Año" not in df.columns:
+
+            anio_col = self._resolver_columna_anio(df)
+            if anio_col is None:
                 return
-            df["Año"] = pd.to_numeric(df["Año"], errors='coerce').fillna(0).astype(int)
-            df = df[df["Año"] != 0]
-            for año in sorted(df["Año"].unique()):
-                subdf = df[df["Año"] == año]
+
+            df_anios = df.copy()
+            df_anios["__anio__"] = pd.to_numeric(df_anios[anio_col], errors='coerce').fillna(0).astype(int)
+            df_anios = df_anios[df_anios["__anio__"] != 0]
+
+            datasets_cargados = []
+            for año in sorted(df_anios["__anio__"].unique()):
+                subdf = df_anios[df_anios["__anio__"] == año]
                 alineado = pd.DataFrame(columns=canonicas)
                 for col in canonicas:
                     if col in subdf.columns:
@@ -354,14 +379,60 @@ class SNIESConsolidador:
                         filas[i] += [""] * (n_cols - len(filas[i]))
                     elif len(filas[i]) > n_cols:
                         filas[i] = filas[i][:n_cols]
-                self.data[tipo]["datasets"].append({
+
+                datasets_cargados.append({
                     "archivo": path,
                     "año": int(año),
                     "fila_inicio": None,
                     "filas": filas
                 })
+
+            self.data[tipo] = {"headers": canonicas, "datasets": datasets_cargados}
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los datos de {tipo}:\n{e}")
+
+    def _resolver_columna_anio(self, df: pd.DataFrame):
+        # Intentar varias estrategias para resolver la columna de año:
+        # 1. Coincidencia exacta del nombre de columna (p. ej. 'Año')
+        col = get_año_col_name(df)
+        if col:
+            return col
+
+        # 2. Buscar la mejor columna por similitud (ej. 'AÑO', 'Ano', 'Año de reporte')
+        try:
+            from app.core.year_utils import buscar_mejor_columna_año, extraer_años_desde_dataframe_scan
+
+            mejor_col, mejor_sim = buscar_mejor_columna_año(list(df.columns))
+            if mejor_col and mejor_sim >= 0.7:
+                return mejor_col
+
+            # 3. Escanear encabezados/primeras celdas en busca de años y mapearlos a una columna
+            años_en_texto = extraer_años_desde_dataframe_scan(df)
+            if años_en_texto:
+                objetivo = años_en_texto[0]
+                # intentar localizar una columna que contenga ese año como valores
+                for c in df.columns:
+                    try:
+                        vals = df[c].dropna().astype(str)
+                        # revisar solo unas pocas muestras para eficiencia
+                        sample = vals.head(200).unique()
+                        for v in sample:
+                            if v is None:
+                                continue
+                            txt = str(v).strip()
+                            if not txt:
+                                continue
+                            if txt.isdigit() and int(txt) == objetivo:
+                                return c
+                            # también comparar patrones dentro del texto
+                            if str(objetivo) in txt:
+                                return c
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        return None
 
     # ---------- Carga inicial (solo metadatos) ----------
     def cargar_csvs_existentes(self):
@@ -461,6 +532,13 @@ class SNIESConsolidador:
         lbl = tk.Label(card, text=texto, anchor='w', bg='white', fg=self.COLOR_PRIMARY,
                        font=('Segoe UI', 10, 'bold'))
         lbl.pack(side='left', padx=10, pady=8, fill=tk.X, expand=True)
+        btn_preview = ttk.Button(
+            card,
+            text="👁️ Previsualizar",
+            command=lambda t=tipo, a=ds["año"]: self.previsualizar_dataset(t, a),
+            style='Accent.TButton',
+        )
+        btn_preview.pack(side='right', padx=5, pady=8)
         btn_del = ttk.Button(card, text="🗑️ Eliminar",
                              command=lambda t=tipo, i=idx: self.eliminar_dataset(t, i),
                              style='Danger.TButton')
@@ -479,87 +557,22 @@ class SNIESConsolidador:
             self.root.update()
 
     def cargar_desde_google_drive(self):
-        """Descarga archivos desde Drive y los carga por tipo de manera automatizada."""
-        def _log(msg: str):
-            print(f"[GoogleDrive] {msg}")
-            self.status_var.set(msg)
-            self.root.update()
+        """Abre la ventana dedicada de Google Drive."""
+        VentanaGoogleDriveImport(self.root, self)
 
-        _log("Iniciando flujo de carga desde Google Drive...")
-        folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
-        if not folder_id:
-            folder_id = simpledialog.askstring(
-                "Google Drive",
-                "Ingrese el ID de la carpeta datos_snies en Google Drive:",
-                parent=self.root,
-            )
-        if not folder_id:
-            _log("Proceso cancelado: no se proporciono ID de carpeta.")
-            return
+    def ejecutar_pipeline_categorias(self):
+        """Abre la ventana de pipeline por categorías con logs en tiempo real."""
+        VentanaPipelineCategorias(self.root, self)
 
-        cred_path = os.getenv("GOOGLE_DRIVE_CREDENTIALS_JSON_PATH", "").strip()
-        cred_path = os.path.expanduser(cred_path) if cred_path else ""
-        if not cred_path or not os.path.exists(cred_path):
-            cred_path = filedialog.askopenfilename(
-                title="Seleccionar credenciales de servicio (JSON)",
-                filetypes=[("JSON", "*.json"), ("Todos los archivos", "*.*")],
-            )
-        if not cred_path:
-            _log("Proceso cancelado: no se selecciono archivo de credenciales.")
-            return
-        if not os.path.exists(cred_path):
-            messagebox.showerror("Error", f"No se encontró el archivo JSON en la ruta indicada:\n{cred_path}")
-            _log("Error: la ruta del JSON no existe.")
-            return
-
-        work_dir = os.path.join(DATA_DIR, "gdrive_import")
-        _log("Conectando con Google Drive...")
-
-        try:
-            datasets = descargar_datasets_desde_drive(
-                folder_id.strip(),
-                cred_path,
-                work_dir,
-                progress_cb=_log,
-            )
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo descargar desde Google Drive:\n{e}")
-            self.status_var.set("Error al descargar desde Google Drive.")
-            print(f"[GoogleDrive] Error en descarga: {e}")
-            return
-
-        total_archivos = sum(len(v) for v in datasets.values())
-        if total_archivos == 0:
-            messagebox.showinfo("Google Drive", "No se encontraron archivos compatibles en la estructura indicada.")
-            self.status_var.set("Sin archivos compatibles en Google Drive.")
-            print("[GoogleDrive] Sin archivos compatibles para procesar.")
-            return
-
-        _log(f"Comenzando integracion de {total_archivos} archivos descargados...")
-        cargados = 0
-        for tipo, archivos in datasets.items():
-            if not archivos:
-                continue
-            self.tipo_seleccionado.set(tipo)
-            self.actualizar_info()
-            _log(f"Integrando tipo '{tipo}' con {len(archivos)} archivo(s)...")
-            for archivo in archivos:
-                _log(f"Procesando archivo local: {archivo}")
-                self.procesar_un_archivo(
-                    archivo,
-                    tipo_forzado=tipo,
-                    confirmar_encabezados=False,
-                    reemplazar_duplicados=True,
-                )
-                cargados += 1
-                self.root.update()
-
-        self.actualizar_info()
-        self.status_var.set(f"Carga desde Google Drive finalizada. Archivos procesados: {cargados}.")
-        print(f"[GoogleDrive] Proceso finalizado. Archivos procesados: {cargados}")
-        messagebox.showinfo("Google Drive", f"Proceso terminado. Archivos procesados: {cargados}.")
-
-    def procesar_un_archivo(self, archivo, tipo_forzado=None, confirmar_encabezados=True, reemplazar_duplicados=False):
+    def procesar_un_archivo(
+        self,
+        archivo,
+        tipo_forzado=None,
+        confirmar_encabezados=True,
+        reemplazar_duplicados=False,
+        show_ui_errors=True,
+        permitir_año_manual=True,
+    ):
         tipo = tipo_forzado or self.tipo_seleccionado.get()
         nombre = os.path.basename(archivo)
         print(f"[Procesamiento] Iniciando {nombre} | tipo={tipo}")
@@ -567,44 +580,50 @@ class SNIESConsolidador:
         self.status_var.set(f"Analizando: {nombre}")
         self.progress_var.set(10)
         self.root.update()
-        fila_inicio = self._detectar_fila_encabezado(archivo)
+        hoja_datos = self._detectar_hoja_datos(archivo)
+        fila_inicio = self._detectar_fila_encabezado(archivo, sheet_name=hoja_datos)
 
         try:
-            df_a2 = pd.read_excel(archivo, sheet_name=0, header=None, nrows=2)
+            df_a2 = self._leer_tabular(archivo, header=None, nrows=2, sheet_name=hoja_datos)
             titulo = str(df_a2.iloc[1, 0]) if df_a2.shape[0] > 1 else ""
         except:
             titulo = ""
 
         try:
-            df_muestra = pd.read_excel(archivo, sheet_name=0, header=fila_inicio, nrows=100)
+            df_muestra = self._leer_tabular(archivo, header=fila_inicio, nrows=100, sheet_name=hoja_datos)
             if df_muestra.empty:
-                messagebox.showwarning("Archivo vacío", f"{nombre}: no se encontraron datos.")
-                return
+                if show_ui_errors:
+                    messagebox.showwarning("Archivo vacío", f"{nombre}: no se encontraron datos.")
+                return False
             columnas_detectadas = [limpiar_nombre_columna(c) for c in df_muestra.columns]
             año = self._extraer_año_desde_df(df_muestra)
+            if año is None:
+                año = extraer_año_desde_archivo(archivo, sheet_name=hoja_datos)
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
+            if show_ui_errors:
+                messagebox.showerror("Error", f"No se pudo leer {nombre}:\n{e}")
             print(f"[Procesamiento] Error leyendo {nombre}: {e}")
-            return
+            return False
 
         if confirmar_encabezados:
             if not self._confirmar_encabezados(columnas_detectadas, archivo, año, titulo):
                 self.status_var.set(f"Cancelado: {nombre}")
                 self.progress_var.set(0)
-                return
+                return False
 
         self.progress_var.set(30)
         self.status_var.set(f"Procesando: {nombre}")
         self.root.update()
 
         try:
-            df = pd.read_excel(archivo, sheet_name=0, header=fila_inicio)
+            df = self._leer_tabular(archivo, header=fila_inicio, sheet_name=hoja_datos)
             df.dropna(how="all", axis=1, inplace=True)
             df.dropna(how="all", axis=0, inplace=True)
             if df.empty:
-                messagebox.showwarning("Sin datos", f"{nombre}: no hay datos después de la limpieza.")
+                if show_ui_errors:
+                    messagebox.showwarning("Sin datos", f"{nombre}: no hay datos después de la limpieza.")
                 print(f"[Procesamiento] Sin datos despues de limpieza: {nombre}")
-                return
+                return False
 
             # Cargar datos completos del tipo si aún no están en memoria
             self._cargar_datos_completos(tipo)
@@ -619,23 +638,42 @@ class SNIESConsolidador:
             # Construir DataFrame solo con canónicas
             df_consolidado = pd.DataFrame()
             for i, col_canonica in enumerate(canonicas):
-                if mapeo.get(i) is not None:
-                    idx_nuevo = mapeo[i]
-                    df_consolidado[col_canonica] = df.iloc[:, idx_nuevo].values
-                else:
+                idx_nuevo = mapeo.get(i)
+                if idx_nuevo is None:
                     df_consolidado[col_canonica] = pd.NA
+                    continue
+                df_consolidado[col_canonica] = df.iloc[:, int(idx_nuevo)].values
 
             # Convertir a string (excepto Año)
             for col in df_consolidado.columns:
                 if col != "Año":
                     df_consolidado[col] = df_consolidado[col].astype(str).replace("<NA>", "")
 
+            # Eliminar pies de pagina detectados al final antes de fijar el año.
+            df_consolidado, filas_pie = eliminar_pies_de_pagina_df(df_consolidado)
+            if filas_pie:
+                print(f"[Procesamiento] Filas de pie de pagina eliminadas ({nombre}): {filas_pie}")
+            if df_consolidado.empty:
+                if show_ui_errors:
+                    messagebox.showwarning("Sin datos", f"{nombre}: solo se detectaron filas no tabulares al final.")
+                print(f"[Procesamiento] Archivo sin filas tabulares tras limpiar pie de pagina: {nombre}")
+                return False
+
             año = self._extraer_año_desde_df(df_consolidado)
             if año is None:
-                messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
+                año = extraer_año_desde_archivo(archivo, sheet_name=hoja_datos)
+            if año is None and permitir_año_manual:
+                # Solo pedir manual cuando se agotaron todas las detecciones automáticas.
+                año = self._pedir_año_manual_desde_ui()
+            if año is None:
+                if show_ui_errors:
+                    messagebox.showerror("Error", f"No se pudo determinar el año en {nombre}.")
                 print(f"[Procesamiento] No se pudo detectar año: {nombre}")
-                return
-            df_consolidado["Año"] = año
+                return False
+            # Intentar asignar usando la utilidad; si no hay columna canónica de año, crearla como fallback
+            ok_asign = asignar_año_a_dataframe(df_consolidado, año)
+            if not ok_asign:
+                df_consolidado["Año"] = año
 
             # Verificar duplicado de año
             if tipo in self.data:
@@ -645,7 +683,7 @@ class SNIESConsolidador:
                         if not messagebox.askyesno("Año duplicado",
                                                    f"Ya existen datos para el año {año} en '{tipo}'.\n¿Desea reemplazarlos?"):
                             self.status_var.set(f"Omitido: {nombre} (año {año} ya existe)")
-                            return
+                            return False
 
             nuevas_filas = df_consolidado.values.tolist()
             n_cols = len(canonicas)
@@ -664,6 +702,7 @@ class SNIESConsolidador:
             ds_existente = next((ds for ds in datasets if ds["año"] == año), None)
             if ds_existente:
                 ds_existente["archivo"] = archivo
+                ds_existente["hoja"] = hoja_datos
                 ds_existente["fila_inicio"] = fila_inicio
                 ds_existente["filas"] = nuevas_filas
                 # Quitar el campo registros si existe para que use filas reales
@@ -671,6 +710,7 @@ class SNIESConsolidador:
             else:
                 datasets.append({
                     "archivo": archivo,
+                    "hoja": hoja_datos,
                     "año": año,
                     "fila_inicio": fila_inicio,
                     "filas": nuevas_filas
@@ -681,12 +721,111 @@ class SNIESConsolidador:
             self.status_var.set(f"✔ {nombre} cargado (Año {año})")
             self.actualizar_info()
             print(f"[Procesamiento] Archivo integrado: {nombre} | año={año} | tipo={tipo}")
+            return True
 
         except Exception as e:
-            messagebox.showerror("Error", f"Error al procesar {nombre}:\n{e}")
+            if show_ui_errors:
+                messagebox.showerror("Error", f"Error al procesar {nombre}:\n{e}")
             print(f"[Procesamiento] Error procesando {nombre}: {e}")
+            return False
 
     # ---------- Eliminar dataset ----------
+    def previsualizar_dataset(self, tipo, año):
+        # Si el dataset viene solo de metadatos, cargamos los datos completos antes de mostrar.
+        self._cargar_datos_completos(tipo)
+
+        if tipo not in self.data:
+            messagebox.showinfo("Sin datos", f"No hay datos disponibles para '{tipo}'.")
+            return
+
+        dataset = next((ds for ds in self.data[tipo]["datasets"] if ds.get("año") == año), None)
+        if dataset is None:
+            messagebox.showinfo("Sin datos", f"No se encontró el dataset del año {año} para '{tipo}'.")
+            return
+
+        headers = self.data[tipo].get("headers", [])
+        filas = dataset.get("filas", [])
+
+        if not filas:
+            messagebox.showinfo("Sin registros", f"El dataset de {tipo} ({año}) no tiene registros para mostrar.")
+            return
+
+        if not headers and filas:
+            headers = [f"Columna {i + 1}" for i in range(len(filas[0]))]
+
+        max_filas_preview = 300
+        total_filas = len(filas)
+        filas_preview = filas[:max_filas_preview]
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Previsualización - {tipo} ({año})")
+        win.geometry("1100x620")
+        win.minsize(800, 500)
+        win.configure(bg='white')
+
+        info_text = (
+            f"Archivo: {os.path.basename(dataset.get('archivo') or f'{tipo}.csv')}  |  "
+            f"Año: {año}  |  Registros: {total_filas}"
+        )
+        lbl_info = tk.Label(
+            win,
+            text=info_text,
+            anchor='w',
+            bg='white',
+            fg=self.COLOR_PRIMARY,
+            font=('Segoe UI', 10, 'bold'),
+            padx=10,
+            pady=8,
+        )
+        lbl_info.pack(fill=tk.X)
+
+        table_frame = ttk.Frame(win)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+
+        tree = ttk.Treeview(table_frame, show='headings')
+        vsb = ttk.Scrollbar(table_frame, orient='vertical', command=tree.yview)
+        hsb = ttk.Scrollbar(table_frame, orient='horizontal', command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        tree['columns'] = headers
+        for col in headers:
+            tree.heading(col, text=col)
+            tree.column(col, width=140, minwidth=90, stretch=True)
+
+        n_cols = len(headers)
+        for fila in filas_preview:
+            valores = list(fila)
+            if len(valores) < n_cols:
+                valores += [""] * (n_cols - len(valores))
+            elif len(valores) > n_cols:
+                valores = valores[:n_cols]
+            tree.insert('', 'end', values=valores)
+
+        pie_texto = (
+            f"Mostrando {len(filas_preview)} de {total_filas} registros."
+            if total_filas > max_filas_preview
+            else f"Mostrando {total_filas} registros."
+        )
+        lbl_footer = tk.Label(
+            win,
+            text=pie_texto,
+            anchor='w',
+            bg='white',
+            fg=self.COLOR_TEXT,
+            font=('Segoe UI', 9),
+            padx=10,
+            pady=4,
+        )
+        lbl_footer.pack(fill=tk.X)
+
+        ttk.Button(win, text="Cerrar", command=win.destroy, style='Primary.TButton').pack(pady=(0, 10))
+
     def eliminar_dataset(self, tipo, idx):
         if not messagebox.askyesno("Eliminar dataset", "¿Está seguro de eliminar este dataset?\nSe borrarán sus registros del CSV maestro."):
             return
@@ -752,12 +891,12 @@ class SNIESConsolidador:
             return self.data[tipo]["headers"]
         return None
 
-    def _detectar_fila_encabezado(self, archivo):
+    def _detectar_fila_encabezado(self, archivo, sheet_name: int | str = 0):
         try:
-            df_raw = pd.read_excel(archivo, sheet_name=0, header=None, nrows=20)
+            df_raw = self._leer_tabular(archivo, header=None, nrows=20, sheet_name=sheet_name)
             best_row = 0
             best_score = -1
-            for i, row in df_raw.iterrows():
+            for i, (_, row) in enumerate(df_raw.iterrows()):
                 non_null = row.dropna()
                 if len(non_null) == 0:
                     continue
@@ -771,29 +910,75 @@ class SNIESConsolidador:
         except Exception:
             return 0
 
-    def _extraer_año_desde_df(self, df):
-        objetivos = ["año", "ano"]
-        mejor_col = None
-        mejor_sim = 0.0
-        for col in df.columns:
-            col_norm = normalizar_para_match(col)
-            for obj in objetivos:
-                sim = similitud_combinada(col_norm, obj)
-                if sim > mejor_sim:
-                    mejor_sim = sim
-                    mejor_col = col
-        if mejor_sim < 0.7:
-            return None
-        valores = df[mejor_col].dropna().unique()
-        if len(valores) == 1:
+    def _detectar_hoja_datos(self, archivo):
+        """Para Excel, selecciona la hoja con mayor probabilidad de contener la tabla de datos."""
+        ext = os.path.splitext(archivo)[1].lower()
+        if ext not in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
+            return 0
+        try:
+            xls = pd.ExcelFile(archivo)
+            mejor_hoja = 0
+            mejor_puntaje = -1
+            for i, hoja in enumerate(xls.sheet_names):
+                try:
+                    df_raw = pd.read_excel(archivo, sheet_name=hoja, header=None, nrows=30)
+                except Exception:
+                    continue
+                if df_raw is None or df_raw.empty:
+                    continue
+
+                # Puntaje simple: más celdas no vacías + presencia de columna de año + años en texto.
+                no_vacias = int(df_raw.notna().sum().sum())
+                try:
+                    df_guess = pd.read_excel(archivo, sheet_name=hoja, header=0, nrows=120)
+                    año_guess = self._extraer_año_desde_df(df_guess)
+                    bonus_año = 50 if año_guess is not None else 0
+                except Exception:
+                    bonus_año = 0
+                puntaje = no_vacias + bonus_año
+                if puntaje > mejor_puntaje:
+                    mejor_puntaje = puntaje
+                    mejor_hoja = hoja
+            return mejor_hoja
+        except Exception:
+            return 0
+
+    def _leer_tabular(self, archivo, header: int | None = 0, nrows=None, sheet_name: int | str = 0):
+        """Lee Excel/CSV devolviendo DataFrame para unificar flujo local y Google Drive."""
+        ext = os.path.splitext(archivo)[1].lower()
+        if ext in {".csv", ".txt"}:
             try:
-                return int(float(valores[0]))
-            except:
-                return None
-        elif len(valores) > 1:
-            messagebox.showwarning("Año múltiple", f"Se encontraron varios años: {valores}. Se usará el primero.")
-            return int(float(valores[0]))
-        return None
+                return pd.read_csv(
+                    archivo,
+                    header=header,
+                    nrows=nrows,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding="utf-8-sig",
+                )
+            except Exception:
+                return pd.read_csv(
+                    archivo,
+                    header=header,
+                    nrows=nrows,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding="latin1",
+                )
+
+        return pd.read_excel(
+            archivo,
+            sheet_name=sheet_name,
+            header=header,
+            nrows=nrows,
+        )
+
+    def _extraer_año_desde_df(self, df):
+        # En el flujo de carga automática no se debe abrir diálogo manual aquí.
+        return extraer_año_desde_dataframe(df, root=self.root, pedir_manual_si_falla=False)
+
+    def _pedir_año_manual_desde_ui(self):
+        return pedir_año_manual()
 
     def _confirmar_encabezados(self, columnas, archivo, año, titulo):
         win = tk.Toplevel(self.root)
@@ -882,6 +1067,42 @@ class SNIESConsolidador:
             messagebox.showinfo("Preprocesamiento", "El CSV maestro fue preprocesado correctamente.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo preprocesar el CSV:\n{e}")
+
+    def _mysql_progress(self, message: str):
+        self.status_var.set(f"MySQL: {message}")
+        self.root.update_idletasks()
+
+    def crear_bd_tablas_mysql(self):
+        if not messagebox.askyesno(
+            "Crear BD y tablas",
+            "Se creará/verificará la base de datos 'snies' y sus tablas en MySQL.\n¿Desea continuar?",
+        ):
+            return
+        self.status_var.set("MySQL: creando/verificando esquema...")
+        self.root.update_idletasks()
+        ok = crear_base_y_tablas(progress_cb=self._mysql_progress)
+        if ok:
+            self.status_var.set("MySQL: base de datos y tablas listas.")
+            messagebox.showinfo("MySQL", "Base de datos y tablas creadas/verificadas correctamente.")
+        else:
+            self.status_var.set("MySQL: falló la creación/verificación de esquema.")
+            messagebox.showerror("MySQL", "No se pudo crear/verificar la base de datos y las tablas.\nRevise la consola para más detalles.")
+
+    def insertar_datos_mysql(self):
+        if not messagebox.askyesno(
+            "Insertar datos en MySQL",
+            "Se insertarán los datos de los CSV maestros en la base 'snies'.\n¿Desea continuar?",
+        ):
+            return
+        self.status_var.set("MySQL: insertando datos CSV...")
+        self.root.update_idletasks()
+        ok = insertar_datos_csv(progress_cb=self._mysql_progress)
+        if ok:
+            self.status_var.set("MySQL: inserción de datos completada.")
+            messagebox.showinfo("MySQL", "Inserción de datos completada correctamente.")
+        else:
+            self.status_var.set("MySQL: falló la inserción de datos.")
+            messagebox.showerror("MySQL", "No se pudo insertar los datos en MySQL.\nRevise la consola para más detalles.")
 
 if __name__ == "__main__":
     root = tk.Tk()

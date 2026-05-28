@@ -15,8 +15,14 @@ NUMERIC_COLUMNS = [
     "ADMITIDOS",
     "GRADUADOS",
     "INSCRITOS",
-    "Matriculados 2017",
+    "Matriculados",
     "No. de Docentes",
+    "No de Docentes",
+    "Nro. de docentes",
+    "Nro de Docentes",
+    "N° de Docentes",
+    "N° de docentes",
+    "Nro. De DOCENTES",
     "PRIMER CURSO",
 ]
 
@@ -48,6 +54,23 @@ VALORES_NULOS_TEXTO = frozenset(
         "no hay informacion",
         "no hay datos",
     }
+)
+
+PIE_PAGINA_HINTS = (
+    "fuente",
+    "nota",
+    "nota:",
+    "elaborado por",
+    "elaboracion",
+    "ministerio",
+    "fecha de corte",
+    "corte a",
+    "pagina",
+    "metodologia",
+    "observacion",
+    "www",
+    "http",
+    "total general",
 )
 
 _PATRONES_MASCULINO = [
@@ -102,6 +125,96 @@ def es_valor_nulo_texto(valor: str) -> bool:
     if not valor.strip():
         return True
     return limpiar_texto_para_match(valor) in VALORES_NULOS_TEXTO
+
+
+def _es_texto_vacio(valor) -> bool:
+    if valor is None or pd.isna(valor):
+        return True
+    return not str(valor).strip()
+
+
+def _parece_numero(valor: str) -> bool:
+    if not isinstance(valor, str):
+        valor = str(valor)
+    txt = valor.strip().replace(".", "").replace(",", "")
+    return bool(txt) and txt.lstrip("-").isdigit()
+
+
+def _es_anio_valido(valor) -> bool:
+    if valor is None or pd.isna(valor):
+        return False
+    txt = str(valor).strip()
+    if not txt:
+        return False
+    if txt.endswith(".0"):
+        txt = txt[:-2]
+    if not txt.isdigit():
+        return False
+    anio = int(txt)
+    return 1900 <= anio <= 2100
+
+
+def _resolver_columna_anio(df: pd.DataFrame) -> Optional[str]:
+    for col in df.columns:
+        if limpiar_texto_para_match(col) == "ano":
+            return col
+    return None
+
+
+def _es_fila_pie_pagina(row: pd.Series, col_anio: Optional[str]) -> bool:
+    valores = []
+    for valor in row.values:
+        if _es_texto_vacio(valor):
+            continue
+        valores.append(str(valor).strip())
+
+    if not valores:
+        return True
+
+    if col_anio and col_anio in row.index and _es_anio_valido(row[col_anio]):
+        return False
+
+    texto_match = limpiar_texto_para_match(" ".join(valores))
+    if texto_match and any(hint in texto_match for hint in PIE_PAGINA_HINTS):
+        return True
+
+    # Notas al pie suelen tener pocas celdas no vacias y texto largo no tabular.
+    if len(valores) <= 2:
+        if any(len(v) >= 25 for v in valores):
+            return True
+        if not any(_parece_numero(v) for v in valores):
+            return True
+
+    # Totales de cierre fuera de tabla, sin año valido.
+    if len(valores) <= 4:
+        contiene_total = any("total" in limpiar_texto_para_match(v) for v in valores)
+        if contiene_total and not (col_anio and _es_anio_valido(row.get(col_anio))):
+            return True
+
+    return False
+
+
+def eliminar_pies_de_pagina_df(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Elimina filas de pie de pagina al final del DataFrame.
+
+    Solo recorta filas consecutivas desde el final para no tocar datos validos intermedios.
+    """
+    if df is None or df.empty:
+        return df, 0
+
+    copia = df.copy()
+    col_anio = _resolver_columna_anio(copia)
+
+    idx = len(copia) - 1
+    eliminadas = 0
+    while idx >= 0 and _es_fila_pie_pagina(copia.iloc[idx], col_anio):
+        eliminadas += 1
+        idx -= 1
+
+    if eliminadas == 0:
+        return copia, 0
+
+    return copia.iloc[: idx + 1].copy(), eliminadas
 
 
 def _map_celdas(df: pd.DataFrame, func: Callable[[object], bool]) -> pd.DataFrame:
@@ -170,6 +283,7 @@ def convertir_tipos_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def limpiar_df_base(df: pd.DataFrame) -> pd.DataFrame:
     copia = df.copy()
+    copia, _ = eliminar_pies_de_pagina_df(copia)
     copia, _, _ = nulificar_celdas_vacias_df(copia)
     copia = copia.dropna(how="all")
     copia = normalizar_instituciones(copia)

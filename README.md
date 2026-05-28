@@ -65,3 +65,21 @@ Qué hace cada módulo:
 
 - [app/ui/main_window.py](app/ui/main_window.py)
 	- Contiene la interfaz principal y consume servicios de app/core.
+
+## Sincronización con MySQL
+
+La sincronización con MySQL ahora es manual desde la interfaz gráfica:
+
+- `🛠️ Crear BD y tablas`: crea/verifica la base de datos `snies` y todas las tablas del modelo.
+- `📥 Insertar CSV en MySQL`: verifica el esquema si hace falta y carga los datos de los CSV maestros en la base existente.
+
+Ninguna de estas acciones se ejecuta automáticamente al abrir la aplicación.
+
+La conexión usa estas variables de entorno opcionales:
+
+- `MYSQL_HOST` (por defecto `localhost`)
+- `MYSQL_PORT` (por defecto `3306`)
+- `MYSQL_USER` (por defecto `root`)
+- `MYSQL_PASSWORD` (por defecto vacío)
+
+Si MySQL no responde o las credenciales no son válidas, la app sigue abriendo y deja el error registrado en consola.
