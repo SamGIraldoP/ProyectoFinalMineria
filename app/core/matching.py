@@ -93,12 +93,6 @@ def limpiar_flotante(s: str) -> str:
         return s[:-2]
     return s
 
-
-
-
- 
-
-
 def mapear_columnas_expandible(canonicas, nuevas_raw, umbral=UMBRAL):
     nuevas_limpias = [limpiar_nombre_columna(c) for c in nuevas_raw]
     canonicas_limpias = [limpiar_nombre_columna(c) for c in canonicas]

@@ -13,7 +13,7 @@ from app.core.year_utils import (
     extraer_año_desde_archivo,
 )
 from app.core.mysql_snies_setup import crear_base_y_tablas, insertar_datos_csv
-from app.core.preprocessing_service import preprocesar_csv_maestro
+from app.core.preprocessing_service import preprocesar_csv_maestro, eliminar_pies_de_pagina_df
 from app.ui.preprocessing_window import VentanaPreprocesamiento
 from app.ui.google_drive_window import VentanaGoogleDriveImport
 from app.ui.pipeline_window import VentanaPipelineCategorias
@@ -648,6 +648,16 @@ class SNIESConsolidador:
             for col in df_consolidado.columns:
                 if col != "Año":
                     df_consolidado[col] = df_consolidado[col].astype(str).replace("<NA>", "")
+
+            # Eliminar pies de pagina detectados al final antes de fijar el año.
+            df_consolidado, filas_pie = eliminar_pies_de_pagina_df(df_consolidado)
+            if filas_pie:
+                print(f"[Procesamiento] Filas de pie de pagina eliminadas ({nombre}): {filas_pie}")
+            if df_consolidado.empty:
+                if show_ui_errors:
+                    messagebox.showwarning("Sin datos", f"{nombre}: solo se detectaron filas no tabulares al final.")
+                print(f"[Procesamiento] Archivo sin filas tabulares tras limpiar pie de pagina: {nombre}")
+                return False
 
             año = self._extraer_año_desde_df(df_consolidado)
             if año is None:
